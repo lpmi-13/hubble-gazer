@@ -1,0 +1,174 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0d1117;
+  color: #c9d1d9;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  z-index: 10;
+}
+
+.header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.status {
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-weight: 500;
+}
+
+.status.connected {
+  background: #0d1f0d;
+  color: #3fb950;
+  border: 1px solid #238636;
+}
+
+.status.disconnected {
+  background: #1f0d0d;
+  color: #f85149;
+  border: 1px solid #da3633;
+}
+
+.main {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Namespace selector */
+.namespace-selector select {
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.namespace-selector select:hover {
+  border-color: #58a6ff;
+}
+
+.namespace-selector select:focus {
+  outline: none;
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 3px rgba(56, 139, 253, 0.3);
+}
+
+/* Flow panel */
+.flow-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 360px;
+  height: 100%;
+  background: #161b22;
+  border-left: 1px solid #30363d;
+  padding: 20px;
+  overflow-y: auto;
+  z-index: 5;
+}
+
+.flow-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.flow-panel-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+.flow-panel-close {
+  background: none;
+  border: none;
+  color: #8b949e;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.flow-panel-close:hover {
+  color: #f0f6fc;
+}
+
+.flow-detail {
+  margin-bottom: 16px;
+}
+
+.flow-detail-label {
+  font-size: 12px;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.flow-detail-value {
+  font-size: 14px;
+  color: #c9d1d9;
+  font-family: 'SF Mono', Consolas, monospace;
+}
+
+.flow-detail-value.success {
+  color: #3fb950;
+}
+
+.flow-detail-value.error {
+  color: #f85149;
+}
+
+.flow-stat-bar {
+  height: 6px;
+  background: #21262d;
+  border-radius: 3px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.flow-stat-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.flow-stat-fill.success {
+  background: #238636;
+}
+
+.flow-stat-fill.error {
+  background: #da3633;
+}

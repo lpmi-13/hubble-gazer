@@ -1,0 +1,9 @@
+# Node
+web/node_modules/
+web/.npm-cache/
+
+# Go
+/bin/
+
+# OS/editor
+.DS_Store
