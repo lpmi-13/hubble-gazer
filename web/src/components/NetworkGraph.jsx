@@ -19,7 +19,7 @@ function getParticleColor(link) {
   return '#3fb950';
 }
 
-export default function NetworkGraph({ data, onLinkClick }) {
+export default function NetworkGraph({ data, onLinkClick, onNodePositionChange }) {
   const graphRef = useRef();
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
@@ -72,6 +72,14 @@ export default function NetworkGraph({ data, onLinkClick }) {
     ctx.fill();
   }, []);
 
+  const handleNodeDragEnd = useCallback((node) => {
+    node.fx = node.x;
+    node.fy = node.y;
+    if (onNodePositionChange) {
+      onNodePositionChange(node.id, node.x, node.y);
+    }
+  }, [onNodePositionChange]);
+
   return (
     <ForceGraph2D
       ref={graphRef}
@@ -92,10 +100,11 @@ export default function NetworkGraph({ data, onLinkClick }) {
       linkDirectionalParticleColor={getParticleColor}
       linkCurvature={0.1}
       onLinkClick={onLinkClick}
-      d3AlphaDecay={0.02}
-      d3VelocityDecay={0.3}
-      cooldownTicks={100}
-      warmupTicks={50}
+      onNodeDragEnd={handleNodeDragEnd}
+      d3AlphaDecay={1}
+      d3VelocityDecay={1}
+      cooldownTicks={0}
+      warmupTicks={0}
     />
   );
 }

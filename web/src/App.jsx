@@ -7,7 +7,7 @@ import { useFlowStream } from './hooks/useFlowStream';
 export default function App() {
   const [namespace, setNamespace] = useState('');
   const [selectedLink, setSelectedLink] = useState(null);
-  const { graphData, connected } = useFlowStream(namespace);
+  const { graphData, connected, persistNodePosition } = useFlowStream(namespace);
 
   const handleLinkClick = useCallback((link) => {
     setSelectedLink(link);
@@ -16,6 +16,10 @@ export default function App() {
   const handleClosePanel = useCallback(() => {
     setSelectedLink(null);
   }, []);
+
+  const handleNodePositionChange = useCallback((id, x, y) => {
+    persistNodePosition(id, x, y);
+  }, [persistNodePosition]);
 
   return (
     <div className="app">
@@ -29,7 +33,11 @@ export default function App() {
         </div>
       </header>
       <main className="main">
-        <NetworkGraph data={graphData} onLinkClick={handleLinkClick} />
+        <NetworkGraph
+          data={graphData}
+          onLinkClick={handleLinkClick}
+          onNodePositionChange={handleNodePositionChange}
+        />
         {selectedLink && (
           <FlowPanel link={selectedLink} onClose={handleClosePanel} />
         )}

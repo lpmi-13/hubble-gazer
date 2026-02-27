@@ -3,27 +3,54 @@
 Realtime Kubernetes network traffic visualization for clusters running Cilium + Hubble.
 
 ## What It Does
-- Connects to Hubble Relay over gRPC
+- Connects to Hubble Relay over gRPC (live mode)
+- Generates synthetic flows for local development (mock mode)
 - Aggregates flows into a rolling service graph
 - Streams graph updates to browser clients via SSE
 - Serves a React UI that visualizes live graph traffic
 
 ## Configuration
+- `FLOW_SOURCE` (`hubble` or `mock`, default: `hubble`)
 - `HUBBLE_RELAY_ADDR` (default: `hubble-relay.kube-system.svc.cluster.local:4245`)
 - `LISTEN_ADDR` (default: `:3000`)
 
 ## Local Development
 
+### Quickstart (single command with sample data)
+
 ```bash
-# frontend
+make dev
+```
+
+This starts:
+- backend on `http://localhost:3000` using built-in mock flow generation
+- frontend on `http://localhost:5173` using Vite proxy to backend
+
+Open `http://localhost:5173`.
+
+### Live mode against Hubble Relay
+
+```bash
+HUBBLE_RELAY_ADDR=<relay-host:4245> make dev-live
+```
+
+### Additional commands
+
+```bash
+make test
+make build-web
+```
+
+## Manual Development (without Make)
+
+```bash
+# terminal 1 (backend)
+FLOW_SOURCE=mock LISTEN_ADDR=:3000 go run .
+
+# terminal 2 (frontend)
 cd web
 npm install
-npm run build
-
-# backend
-cd ..
-go test ./...
-go run .
+npm run dev
 ```
 
 ## Container Build

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/iximiuz/hubble-gazer/graph"
 	"github.com/iximiuz/hubble-gazer/hubble"
+	"github.com/iximiuz/hubble-gazer/mock"
 )
 
 //go:embed web/dist/*
@@ -20,19 +22,30 @@ var frontendFS embed.FS
 func main() {
 	addr := envOr("LISTEN_ADDR", ":3000")
 	relayAddr := envOr("HUBBLE_RELAY_ADDR", "hubble-relay.kube-system.svc.cluster.local:4245")
+	flowSource := envOr("FLOW_SOURCE", "hubble")
 
 	aggregator := graph.NewAggregator(30 * time.Second)
 
-	client := hubble.NewClient(relayAddr, aggregator)
-	go func() {
-		for {
-			log.Printf("connecting to Hubble Relay at %s", relayAddr)
-			if err := client.Run(); err != nil {
-				log.Printf("hubble client error: %v; reconnecting in 5s", err)
+	switch flowSource {
+	case "mock":
+		generator := mock.NewGenerator(42, aggregator)
+		go generator.Run(context.Background())
+		log.Printf("flow source: mock generator")
+	case "hubble":
+		client := hubble.NewClient(relayAddr, aggregator)
+		go func() {
+			for {
+				log.Printf("connecting to Hubble Relay at %s", relayAddr)
+				if err := client.Run(); err != nil {
+					log.Printf("hubble client error: %v; reconnecting in 5s", err)
+				}
+				time.Sleep(5 * time.Second)
 			}
-			time.Sleep(5 * time.Second)
-		}
-	}()
+		}()
+		log.Printf("flow source: hubble relay")
+	default:
+		log.Fatalf("invalid FLOW_SOURCE=%q (expected mock|hubble)", flowSource)
+	}
 
 	mux := http.NewServeMux()
 
