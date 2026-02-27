@@ -5,77 +5,71 @@ export default function FlowPanel({ link, onClose }) {
 
   const sourceLabel = typeof link.source === 'object' ? link.source.label || link.source.id : link.source;
   const targetLabel = typeof link.target === 'object' ? link.target.label || link.target.id : link.target;
-  const successPct = ((link.successRate || 0) * 100).toFixed(1);
-  const errorPct = (100 - successPct).toFixed(1);
+  const successPct = Math.max(0, Math.min(100, (link.successRate || 0) * 100));
+  const errorPct = Math.max(0, 100 - successPct);
+  const verdict = link.verdict || 'unknown';
+  const verdictClass = verdict === 'FORWARDED' ? 'success' : verdict === 'DROPPED' ? 'error' : 'warn';
 
   return (
-    <div className="flow-panel">
+    <aside className="flow-panel" role="complementary" aria-label="Flow details">
       <div className="flow-panel-header">
-        <h2>Flow Details</h2>
-        <button className="flow-panel-close" onClick={onClose}>
+        <div>
+          <p className="flow-panel-kicker">Edge Details</p>
+          <h2>Traffic Profile</h2>
+        </div>
+        <button type="button" className="flow-panel-close" onClick={onClose} aria-label="Close flow details">
           ×
         </button>
       </div>
 
-      <div className="flow-detail">
-        <div className="flow-detail-label">Source</div>
-        <div className="flow-detail-value">{sourceLabel}</div>
+      <p className="flow-panel-meta">Live values over the active 30 second aggregation window.</p>
+
+      <div className="flow-route">
+        <div className="flow-route-endpoint">{sourceLabel}</div>
+        <div className="flow-route-arrow">→</div>
+        <div className="flow-route-endpoint">{targetLabel}</div>
       </div>
 
-      <div className="flow-detail">
-        <div className="flow-detail-label">Destination</div>
-        <div className="flow-detail-value">{targetLabel}</div>
-      </div>
-
-      <div className="flow-detail">
-        <div className="flow-detail-label">Protocol</div>
-        <div className="flow-detail-value">{link.protocol || 'unknown'}</div>
-      </div>
-
-      <div className="flow-detail">
-        <div className="flow-detail-label">Flow Rate</div>
-        <div className="flow-detail-value">
-          {(link.flowRate || 0).toFixed(2)} flows/sec
+      <div className="flow-grid">
+        <div className="flow-card">
+          <div className="flow-card-label">Protocol</div>
+          <div className="flow-card-value monospace">{link.protocol || 'unknown'}</div>
+        </div>
+        <div className="flow-card">
+          <div className="flow-card-label">Flow Rate</div>
+          <div className="flow-card-value">{(link.flowRate || 0).toFixed(2)} flows/s</div>
+        </div>
+        <div className="flow-card">
+          <div className="flow-card-label">Total Flows</div>
+          <div className="flow-card-value">{link.flowCount || 0}</div>
+        </div>
+        <div className="flow-card">
+          <div className="flow-card-label">Verdict</div>
+          <div className={`flow-card-value ${verdictClass}`}>{verdict}</div>
         </div>
       </div>
 
-      <div className="flow-detail">
-        <div className="flow-detail-label">Total Flows (30s window)</div>
-        <div className="flow-detail-value">{link.flowCount || 0}</div>
-      </div>
-
-      <div className="flow-detail">
-        <div className="flow-detail-label">Verdict</div>
-        <div className={`flow-detail-value ${link.verdict === 'FORWARDED' ? 'success' : 'error'}`}>
-          {link.verdict || 'unknown'}
+      <div className="flow-progress">
+        <div className="flow-progress-header">
+          <span>Success Rate</span>
+          <span className={successPct > 90 ? 'success' : 'warn'}>{successPct.toFixed(1)}%</span>
+        </div>
+        <div className="flow-progress-track">
+          <div className="flow-progress-fill success" style={{ width: `${successPct.toFixed(1)}%` }} />
         </div>
       </div>
 
-      <div className="flow-detail">
-        <div className="flow-detail-label">Success Rate</div>
-        <div className={`flow-detail-value ${parseFloat(successPct) > 90 ? 'success' : 'error'}`}>
-          {successPct}%
-        </div>
-        <div className="flow-stat-bar">
-          <div
-            className="flow-stat-fill success"
-            style={{ width: `${successPct}%` }}
-          />
-        </div>
-      </div>
-
-      {parseFloat(errorPct) > 0 && (
-        <div className="flow-detail">
-          <div className="flow-detail-label">Error Rate</div>
-          <div className="flow-detail-value error">{errorPct}%</div>
-          <div className="flow-stat-bar">
-            <div
-              className="flow-stat-fill error"
-              style={{ width: `${errorPct}%` }}
-            />
+      {errorPct > 0 && (
+        <div className="flow-progress">
+          <div className="flow-progress-header">
+            <span>Error Rate</span>
+            <span className={errorPct > 10 ? 'error' : 'warn'}>{errorPct.toFixed(1)}%</span>
+          </div>
+          <div className="flow-progress-track">
+            <div className="flow-progress-fill error" style={{ width: `${errorPct.toFixed(1)}%` }} />
           </div>
         </div>
       )}
-    </div>
+    </aside>
   );
 }

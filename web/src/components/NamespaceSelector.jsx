@@ -28,16 +28,19 @@ export default function NamespaceSelector({ value, onChange }) {
     };
   }, []);
 
+  const sortedNamespaces = [...namespaces].sort((a, b) => a.localeCompare(b));
+
   return (
-    <div className="namespace-selector">
+    <label className="namespace-selector">
+      <span className="selector-label">Scope</span>
       <select value={value} onChange={(e) => onChange(e.target.value)}>
         <option value="">All Namespaces</option>
-        {namespaces.sort().map((ns) => (
+        {sortedNamespaces.map((ns) => (
           <option key={ns} value={ns}>
             {ns}
           </option>
         ))}
       </select>
-    </div>
+    </label>
   );
 }

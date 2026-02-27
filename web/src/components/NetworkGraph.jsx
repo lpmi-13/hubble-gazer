@@ -19,20 +19,54 @@ function getParticleColor(link) {
   return '#3fb950';
 }
 
-export default function NetworkGraph({ data, onLinkClick, onNodePositionChange }) {
+export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePositionChange }) {
   const graphRef = useRef();
-  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const containerRef = useRef();
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
-    function handleResize() {
-      setDimensions({
-        width: window.innerWidth,
-        height: window.innerHeight - 52, // header height
-      });
+    const container = containerRef.current;
+    if (!container) {
+      return undefined;
     }
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+
+    const updateSize = () => {
+      const rect = container.getBoundingClientRect();
+      const width = Math.floor(rect.width);
+      const height = Math.floor(rect.height);
+      setDimensions((prev) => {
+        if (prev.width === width && prev.height === height) {
+          return prev;
+        }
+        return { width, height };
+      });
+    };
+
+    if (typeof ResizeObserver === 'undefined') {
+      updateSize();
+      window.addEventListener('resize', updateSize);
+      return () => window.removeEventListener('resize', updateSize);
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const next = entries[0];
+      if (!next) {
+        return;
+      }
+      const width = Math.floor(next.contentRect.width);
+      const height = Math.floor(next.contentRect.height);
+      setDimensions((prev) => {
+        if (prev.width === width && prev.height === height) {
+          return prev;
+        }
+        return { width, height };
+      });
+    });
+
+    observer.observe(container);
+    updateSize();
+    return () => observer.disconnect();
   }, []);
 
   const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
@@ -57,10 +91,10 @@ export default function NetworkGraph({ data, onLinkClick, onNodePositionChange }
     ctx.globalAlpha = 1;
 
     // Draw label
-    ctx.font = `${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.font = `${fontSize}px "IBM Plex Sans", "Space Grotesk", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillStyle = '#c9d1d9';
+    ctx.fillStyle = '#dbf2ff';
     ctx.fillText(label, node.x, node.y + nodeSize + 3);
   }, []);
 
@@ -72,7 +106,23 @@ export default function NetworkGraph({ data, onLinkClick, onNodePositionChange }
     ctx.fill();
   }, []);
 
+  const handleNodeDrag = useCallback((node) => {
+    if (!node) {
+      return;
+    }
+    setIsDragging(true);
+    node.fx = node.x;
+    node.fy = node.y;
+    if (onNodeDrag) {
+      onNodeDrag(node.id, node.x, node.y);
+    }
+  }, [onNodeDrag]);
+
   const handleNodeDragEnd = useCallback((node) => {
+    setIsDragging(false);
+    if (!node) {
+      return;
+    }
     node.fx = node.x;
     node.fy = node.y;
     if (onNodePositionChange) {
@@ -81,30 +131,39 @@ export default function NetworkGraph({ data, onLinkClick, onNodePositionChange }
   }, [onNodePositionChange]);
 
   return (
-    <ForceGraph2D
-      ref={graphRef}
-      graphData={data}
-      width={dimensions.width}
-      height={dimensions.height}
-      backgroundColor="#0d1117"
-      nodeId="id"
-      nodeCanvasObject={nodeCanvasObject}
-      nodePointerAreaPaint={nodePointerAreaPaint}
-      linkColor={() => '#30363d'}
-      linkWidth={(link) => Math.max(1, Math.log2((link.flowRate || 0) + 1) * 2)}
-      linkDirectionalParticles={(link) => Math.ceil(link.flowRate || 0)}
-      linkDirectionalParticleWidth={(link) =>
-        Math.max(2, Math.sqrt(link.flowRate || 0) * 3)
-      }
-      linkDirectionalParticleSpeed={0.005}
-      linkDirectionalParticleColor={getParticleColor}
-      linkCurvature={0.1}
-      onLinkClick={onLinkClick}
-      onNodeDragEnd={handleNodeDragEnd}
-      d3AlphaDecay={1}
-      d3VelocityDecay={1}
-      cooldownTicks={0}
-      warmupTicks={0}
-    />
+    <div
+      ref={containerRef}
+      className={`network-graph ${isDragging ? 'network-graph-dragging' : ''}`}
+    >
+      {dimensions.width > 0 && dimensions.height > 0 && (
+        <ForceGraph2D
+          ref={graphRef}
+          graphData={data}
+          width={dimensions.width}
+          height={dimensions.height}
+          backgroundColor="transparent"
+          nodeId="id"
+          nodeCanvasObject={nodeCanvasObject}
+          nodePointerAreaPaint={nodePointerAreaPaint}
+          linkColor={() => '#2f4c65'}
+          linkWidth={(link) => Math.max(1, Math.log2((link.flowRate || 0) + 1) * 2)}
+          linkDirectionalParticles={(link) => Math.ceil(link.flowRate || 0)}
+          linkDirectionalParticleWidth={(link) =>
+            Math.max(2, Math.sqrt(link.flowRate || 0) * 3)
+          }
+          linkDirectionalParticleSpeed={0.005}
+          linkDirectionalParticleColor={getParticleColor}
+          linkCurvature={0.1}
+          onLinkClick={onLinkClick}
+          onNodeDrag={handleNodeDrag}
+          onNodeDragEnd={handleNodeDragEnd}
+          onBackgroundClick={() => setIsDragging(false)}
+          d3AlphaDecay={1}
+          d3VelocityDecay={1}
+          cooldownTicks={0}
+          warmupTicks={0}
+        />
+      )}
+    </div>
   );
 }

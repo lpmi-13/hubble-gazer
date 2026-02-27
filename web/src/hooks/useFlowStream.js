@@ -33,19 +33,33 @@ export function useFlowStream(namespace) {
   const [connected, setConnected] = useState(false);
   const sourceRef = useRef(null);
   const nodePositionsRef = useRef(new Map());
+  const draggingNodeIdsRef = useRef(new Set());
 
-  const persistNodePosition = useCallback((nodeId, x, y) => {
+  const trackNodePosition = useCallback((nodeId, x, y) => {
     if (!nodeId || !Number.isFinite(x) || !Number.isFinite(y)) {
       return;
     }
+    draggingNodeIdsRef.current.add(nodeId);
     nodePositionsRef.current.set(nodeId, { x, y, fx: x, fy: y });
+  }, []);
+
+  const persistNodePosition = useCallback((nodeId, x, y) => {
+    if (!nodeId || !Number.isFinite(x) || !Number.isFinite(y)) {
+      draggingNodeIdsRef.current.delete(nodeId);
+      return;
+    }
+    draggingNodeIdsRef.current.delete(nodeId);
+    const nextPos = { x, y, fx: x, fy: y };
+    nodePositionsRef.current.set(nodeId, nextPos);
     setGraphData((prev) => ({
       ...prev,
-      nodes: prev.nodes.map((n) => (n.id === nodeId ? { ...n, x, y, fx: x, fy: y } : n)),
+      nodes: prev.nodes.map((n) => (n.id === nodeId ? { ...n, ...nextPos } : n)),
     }));
   }, []);
 
   useEffect(() => {
+    setConnected(false);
+
     const url = namespace
       ? `/api/flows?namespace=${encodeURIComponent(namespace)}`
       : '/api/flows';
@@ -60,18 +74,29 @@ export function useFlowStream(namespace) {
     source.onmessage = (event) => {
       try {
         const graph = JSON.parse(event.data);
+        const links = graph.links || [];
+        const visibleNodeIds = new Set();
 
         const nodes = (graph.nodes || []).map((node) => {
+          visibleNodeIds.add(node.id);
           const prev = nodePositionsRef.current.get(node.id);
           const pos = prev || groupedPositionForNode(node.id, node.namespace || '');
-          const next = { ...node, ...pos };
+          const isDragging = draggingNodeIdsRef.current.has(node.id);
+          const nextPos = isDragging ? pos : { ...pos, fx: pos.x, fy: pos.y };
+          const next = { ...node, ...nextPos };
           nodePositionsRef.current.set(node.id, pos);
           return next;
         });
 
+        for (const draggingId of draggingNodeIdsRef.current) {
+          if (!visibleNodeIds.has(draggingId)) {
+            draggingNodeIdsRef.current.delete(draggingId);
+          }
+        }
+
         setGraphData({
           nodes,
-          links: graph.links || [],
+          links,
         });
       } catch {
         // Ignore malformed messages
@@ -88,5 +113,5 @@ export function useFlowStream(namespace) {
     };
   }, [namespace]);
 
-  return { graphData, connected, persistNodePosition };
+  return { graphData, connected, trackNodePosition, persistNodePosition };
 }
