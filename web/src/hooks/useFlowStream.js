@@ -25,14 +25,41 @@ function groupedPositionForNode(id, namespace) {
 
   const x = center.x + Math.cos(angle) * radius;
   const y = center.y + Math.sin(angle) * radius;
-  return { x, y, fx: x, fy: y };
+  return { x, y };
+}
+
+const STORAGE_KEY = 'hubble-gazer-node-positions';
+
+function loadPositionsFromStorage() {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const entries = JSON.parse(saved);
+      return new Map(Object.entries(entries));
+    }
+  } catch {
+    // Ignore corrupted storage
+  }
+  return new Map();
+}
+
+function savePositionsToStorage(positionsMap) {
+  try {
+    const obj = {};
+    for (const [id, pos] of positionsMap) {
+      obj[id] = { x: pos.x, y: pos.y };
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+  } catch {
+    // Ignore storage errors (quota, etc.)
+  }
 }
 
 export function useFlowStream(namespace) {
   const [graphData, setGraphData] = useState(EMPTY_GRAPH);
   const [connected, setConnected] = useState(false);
   const sourceRef = useRef(null);
-  const nodePositionsRef = useRef(new Map());
+  const nodePositionsRef = useRef(loadPositionsFromStorage());
   const draggingNodeIdsRef = useRef(new Set());
 
   const trackNodePosition = useCallback((nodeId, x, y) => {
@@ -40,7 +67,7 @@ export function useFlowStream(namespace) {
       return;
     }
     draggingNodeIdsRef.current.add(nodeId);
-    nodePositionsRef.current.set(nodeId, { x, y, fx: x, fy: y });
+    nodePositionsRef.current.set(nodeId, { x, y });
   }, []);
 
   const persistNodePosition = useCallback((nodeId, x, y) => {
@@ -49,8 +76,9 @@ export function useFlowStream(namespace) {
       return;
     }
     draggingNodeIdsRef.current.delete(nodeId);
-    const nextPos = { x, y, fx: x, fy: y };
+    const nextPos = { x, y };
     nodePositionsRef.current.set(nodeId, nextPos);
+    savePositionsToStorage(nodePositionsRef.current);
     setGraphData((prev) => ({
       ...prev,
       nodes: prev.nodes.map((n) => (n.id === nodeId ? { ...n, ...nextPos } : n)),
@@ -82,9 +110,9 @@ export function useFlowStream(namespace) {
           const prev = nodePositionsRef.current.get(node.id);
           const pos = prev || groupedPositionForNode(node.id, node.namespace || '');
           const isDragging = draggingNodeIdsRef.current.has(node.id);
-          const nextPos = isDragging ? pos : { ...pos, fx: pos.x, fy: pos.y };
+          const nextPos = isDragging ? { ...pos, fx: pos.x, fy: pos.y } : pos;
           const next = { ...node, ...nextPos };
-          nodePositionsRef.current.set(node.id, pos);
+          nodePositionsRef.current.set(node.id, { x: pos.x, y: pos.y });
           return next;
         });
 

@@ -24,6 +24,13 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
   const containerRef = useRef();
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [isDragging, setIsDragging] = useState(false);
+  const [hasReceivedData, setHasReceivedData] = useState(false);
+
+  useEffect(() => {
+    if (data.nodes.length > 0 && !hasReceivedData) {
+      setHasReceivedData(true);
+    }
+  }, [data.nodes.length, hasReceivedData]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -130,6 +137,9 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
     }
   }, [onNodePositionChange]);
 
+  const showLoading = !hasReceivedData && data.nodes.length === 0;
+  const showEmpty = hasReceivedData && data.nodes.length === 0;
+
   return (
     <div
       ref={containerRef}
@@ -158,11 +168,28 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
           onNodeDrag={handleNodeDrag}
           onNodeDragEnd={handleNodeDragEnd}
           onBackgroundClick={() => setIsDragging(false)}
-          d3AlphaDecay={1}
-          d3VelocityDecay={1}
-          cooldownTicks={0}
-          warmupTicks={0}
+          d3AlphaDecay={0.0228}
+          d3VelocityDecay={0.4}
+          cooldownTicks={50}
+          warmupTicks={20}
         />
+      )}
+      {showLoading && (
+        <div className="graph-overlay" aria-live="polite">
+          <div className="graph-loading">
+            <div className="graph-loading-spinner" />
+            <div className="graph-loading-text">Waiting for network flows...</div>
+          </div>
+        </div>
+      )}
+      {showEmpty && (
+        <div className="graph-overlay" aria-live="polite">
+          <div className="graph-empty">
+            <div className="graph-empty-icon" aria-hidden="true">&#8728;</div>
+            <div className="graph-empty-text">No network flows detected</div>
+            <div className="graph-empty-hint">Flows will appear when traffic is observed</div>
+          </div>
+        </div>
       )}
     </div>
   );

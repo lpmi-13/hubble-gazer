@@ -33,7 +33,11 @@ export default function NamespaceSelector({ value, onChange }) {
   return (
     <label className="namespace-selector">
       <span className="selector-label">Scope</span>
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label="Select namespace"
+      >
         <option value="">All Namespaces</option>
         {sortedNamespaces.map((ns) => (
           <option key={ns} value={ns}>
