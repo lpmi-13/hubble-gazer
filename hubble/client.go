@@ -2,6 +2,7 @@ package hubble
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,7 @@ import (
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -21,22 +23,31 @@ type FlowConsumer interface {
 // Client connects to Hubble Relay and streams flows.
 type Client struct {
 	addr     string
+	useTLS   bool
 	consumer FlowConsumer
 }
 
 // NewClient creates a new Hubble Relay client.
-func NewClient(addr string, consumer FlowConsumer) *Client {
+// When useTLS is true, the connection uses TLS with system CA certificates.
+// When false, the connection is plaintext (suitable for in-cluster or local dev).
+func NewClient(addr string, useTLS bool, consumer FlowConsumer) *Client {
 	return &Client{
 		addr:     addr,
+		useTLS:   useTLS,
 		consumer: consumer,
 	}
 }
 
 // Run connects to Hubble Relay and streams flows until an error occurs.
 func (c *Client) Run() error {
-	conn, err := grpc.NewClient(c.addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	var creds grpc.DialOption
+	if c.useTLS {
+		creds = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
+	} else {
+		creds = grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+
+	conn, err := grpc.NewClient(c.addr, creds)
 	if err != nil {
 		return fmt.Errorf("grpc dial: %w", err)
 	}

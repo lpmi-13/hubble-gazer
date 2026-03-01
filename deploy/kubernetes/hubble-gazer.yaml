@@ -1,3 +1,12 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hubble-gazer
+  namespace: kube-system
+  labels:
+    app: hubble-gazer
+automountServiceAccountToken: false
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,6 +24,7 @@ spec:
       labels:
         app: hubble-gazer
     spec:
+      serviceAccountName: hubble-gazer
       containers:
       - name: hubble-gazer
         image: ghcr.io/iximiuz/hubble-gazer:v0.1.0
@@ -32,12 +42,27 @@ spec:
           limits:
             cpu: 200m
             memory: 128Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65534
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
         readinessProbe:
           httpGet:
             path: /healthz
             port: 3000
           initialDelaySeconds: 5
           periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 15
 ---
 apiVersion: v1
 kind: Service
@@ -47,10 +72,41 @@ metadata:
   labels:
     app: hubble-gazer
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
   - port: 3000
     targetPort: 3000
     name: http
   selector:
     app: hubble-gazer
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hubble-gazer
+  namespace: kube-system
+spec:
+  podSelector:
+    matchLabels:
+      app: hubble-gazer
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - ports:
+    - port: 3000
+      protocol: TCP
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          k8s-app: hubble-relay
+    ports:
+    - port: 4245
+      protocol: TCP
+  - to: []
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP

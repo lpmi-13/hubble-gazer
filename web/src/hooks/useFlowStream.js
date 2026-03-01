@@ -35,7 +35,17 @@ function loadPositionsFromStorage() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const entries = JSON.parse(saved);
-      return new Map(Object.entries(entries));
+      if (typeof entries !== 'object' || entries === null || Array.isArray(entries)) {
+        return new Map();
+      }
+      const validated = new Map();
+      for (const [key, val] of Object.entries(entries)) {
+        if (key.length > 256) continue;
+        if (val && typeof val === 'object' && Number.isFinite(val.x) && Number.isFinite(val.y)) {
+          validated.set(key, { x: val.x, y: val.y });
+        }
+      }
+      return validated;
     }
   } catch {
     // Ignore corrupted storage
