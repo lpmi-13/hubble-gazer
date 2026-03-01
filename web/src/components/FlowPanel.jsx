@@ -1,6 +1,24 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 
 export default function FlowPanel({ link, onClose }) {
+  const panelRef = useRef(null);
+
+  useEffect(() => {
+    if (link && panelRef.current) {
+      panelRef.current.focus();
+    }
+  }, [link]);
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
   if (!link) return null;
 
   const sourceLabel = typeof link.source === 'object' ? link.source.label || link.source.id : link.source;
@@ -11,7 +29,13 @@ export default function FlowPanel({ link, onClose }) {
   const verdictClass = verdict === 'FORWARDED' ? 'success' : verdict === 'DROPPED' ? 'error' : 'warn';
 
   return (
-    <aside className="flow-panel" role="complementary" aria-label="Flow details">
+    <aside
+      className="flow-panel"
+      ref={panelRef}
+      role="complementary"
+      aria-label="Flow details"
+      tabIndex={-1}
+    >
       <div className="flow-panel-header">
         <div>
           <p className="flow-panel-kicker">Edge Details</p>
@@ -54,7 +78,7 @@ export default function FlowPanel({ link, onClose }) {
           <span>Success Rate</span>
           <span className={successPct > 90 ? 'success' : 'warn'}>{successPct.toFixed(1)}%</span>
         </div>
-        <div className="flow-progress-track">
+        <div className="flow-progress-track" role="progressbar" aria-valuenow={successPct.toFixed(1)} aria-valuemin="0" aria-valuemax="100">
           <div className="flow-progress-fill success" style={{ width: `${successPct.toFixed(1)}%` }} />
         </div>
       </div>
@@ -65,7 +89,7 @@ export default function FlowPanel({ link, onClose }) {
             <span>Error Rate</span>
             <span className={errorPct > 10 ? 'error' : 'warn'}>{errorPct.toFixed(1)}%</span>
           </div>
-          <div className="flow-progress-track">
+          <div className="flow-progress-track" role="progressbar" aria-valuenow={errorPct.toFixed(1)} aria-valuemin="0" aria-valuemax="100">
             <div className="flow-progress-fill error" style={{ width: `${errorPct.toFixed(1)}%` }} />
           </div>
         </div>

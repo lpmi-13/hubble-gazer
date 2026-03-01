@@ -30,6 +30,8 @@
   --timing-fast: 180ms;
   --timing-base: 320ms;
   --timing-slow: 560ms;
+
+  --focus-ring: 0 0 0 3px rgba(38, 184, 255, 0.3);
 }
 
 * {
@@ -52,6 +54,12 @@ body {
     radial-gradient(circle at 100% 100%, #0f3553 0%, transparent 45%),
     linear-gradient(150deg, var(--bg-0) 0%, var(--bg-1) 46%, var(--bg-2) 100%);
   overflow: hidden;
+}
+
+/* Global focus-visible styles */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .app {
@@ -156,7 +164,13 @@ body {
   gap: 12px;
 }
 
+/* ===========================
+   Connection Status
+   =========================== */
 .status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -166,6 +180,15 @@ body {
   transition: all var(--timing-fast) var(--easing-standard);
 }
 
+.status::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
 .status.connected {
   background: rgba(28, 88, 74, 0.28);
   border-color: rgba(66, 209, 172, 0.42);
@@ -173,10 +196,19 @@ body {
   box-shadow: 0 0 22px rgba(66, 209, 172, 0.22);
 }
 
+.status.connected::before {
+  background: var(--success);
+  animation: pulse 2s ease-in-out infinite;
+}
+
 .status.disconnected {
   background: rgba(98, 36, 44, 0.24);
   border-color: rgba(255, 110, 110, 0.42);
   color: var(--error);
+}
+
+.status.disconnected::before {
+  background: var(--error);
 }
 
 .main {
@@ -449,6 +481,68 @@ body {
   background: linear-gradient(90deg, #d94c58 0%, #ff8b8b 100%);
 }
 
+/* ===========================
+   Graph Loading & Empty States
+   =========================== */
+.graph-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.graph-loading {
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.graph-loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--stroke);
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 16px;
+}
+
+.graph-loading-text {
+  font-size: 13px;
+  animation: ambientPulse 2s ease-in-out infinite;
+}
+
+.graph-empty {
+  text-align: center;
+  color: var(--text-muted);
+  animation: fadeInUp var(--timing-slow) var(--easing-standard);
+}
+
+.graph-empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.graph-empty-text {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.graph-empty-hint {
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+/* ===========================
+   Responsive
+   =========================== */
 @media (max-width: 1100px) {
   .header {
     grid-template-columns: 1fr;
@@ -498,6 +592,9 @@ body {
   }
 }
 
+/* ===========================
+   Accessibility: Reduced Motion
+   =========================== */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -505,6 +602,24 @@ body {
     animation: none !important;
     transition-duration: 1ms !important;
     transition-delay: 0ms !important;
+  }
+}
+
+/* ===========================
+   Keyframe Animations
+   =========================== */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.7;
   }
 }
 

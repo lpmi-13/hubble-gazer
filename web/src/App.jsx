@@ -63,7 +63,7 @@ export default function App() {
   return (
     <div className="app">
       <div className="app-background" aria-hidden="true" />
-      <header className="header">
+      <header className="header" role="banner">
         <div className="header-brand">
           <p className="header-kicker">Realtime Service Topology</p>
           <h1>Hubble Gazer</h1>
@@ -84,12 +84,16 @@ export default function App() {
         </div>
         <div className="header-controls">
           <NamespaceSelector value={namespace} onChange={setNamespace} />
-          <span className={`status ${connected ? 'connected' : 'disconnected'}`}>
+          <span
+            className={`status ${connected ? 'connected' : 'disconnected'}`}
+            role="status"
+            aria-live="polite"
+          >
             {connected ? 'Stream Live' : 'Reconnecting'}
           </span>
         </div>
       </header>
-      <main className={`main ${selectedLink ? 'main-panel-open' : ''}`}>
+      <main className={`main ${selectedLink ? 'main-panel-open' : ''}`} role="main">
         <section className="graph-stage">
           <NetworkGraph
             data={graphData}
