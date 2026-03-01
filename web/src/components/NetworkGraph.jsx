@@ -168,10 +168,10 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
           onNodeDrag={handleNodeDrag}
           onNodeDragEnd={handleNodeDragEnd}
           onBackgroundClick={() => setIsDragging(false)}
-          d3AlphaDecay={1}
-          d3VelocityDecay={1}
-          cooldownTicks={0}
-          warmupTicks={0}
+          d3AlphaDecay={0.0228}
+          d3VelocityDecay={0.4}
+          cooldownTicks={50}
+          warmupTicks={20}
         />
       )}
       {showLoading && (
