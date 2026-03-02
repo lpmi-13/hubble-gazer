@@ -5,7 +5,7 @@ go 1.23.0
 require (
 	github.com/cilium/cilium v1.16.5
 	google.golang.org/grpc v1.69.2
-	google.golang.org/protobuf v1.36.1
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
