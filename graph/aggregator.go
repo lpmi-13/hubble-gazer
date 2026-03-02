@@ -50,13 +50,15 @@ type Aggregator struct {
 	window   time.Duration
 	flows    []flowRecord
 	nsSet    map[string]struct{}
+	maxFlows int
 }
 
 // NewAggregator creates a new flow aggregator with the given sliding window duration.
 func NewAggregator(window time.Duration) *Aggregator {
 	return &Aggregator{
-		window: window,
-		nsSet:  make(map[string]struct{}),
+		window:   window,
+		nsSet:    make(map[string]struct{}),
+		maxFlows: 100000,
 	}
 }
 
@@ -116,6 +118,11 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 	}
 	if dstNS != "" {
 		a.nsSet[dstNS] = struct{}{}
+	}
+	// Evict oldest 10% when over capacity to avoid per-insert eviction overhead.
+	if len(a.flows) > a.maxFlows {
+		drop := a.maxFlows / 10
+		a.flows = a.flows[drop:]
 	}
 	a.mu.Unlock()
 }

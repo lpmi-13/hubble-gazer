@@ -1,7 +1,7 @@
-FROM node:22-alpine AS frontend-build
+FROM node:24-alpine AS frontend-build
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json* ./
-RUN npm install
+RUN npm ci
 COPY web/ ./
 RUN npm run build
 
@@ -12,9 +12,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=frontend-build /app/web/dist ./web/dist
-RUN CGO_ENABLED=0 GOOS=linux go build -o /hubble-gazer .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /hubble-gazer .
 
 FROM gcr.io/distroless/static-debian12
 COPY --from=backend-build /hubble-gazer /hubble-gazer
 EXPOSE 3000
+# Run as non-root. HEALTHCHECK is omitted because distroless has no shell;
+# Kubernetes readiness/liveness probes handle health checking.
+USER 65534:65534
 ENTRYPOINT ["/hubble-gazer"]
