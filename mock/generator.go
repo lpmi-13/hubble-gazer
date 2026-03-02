@@ -23,6 +23,9 @@ type edge struct {
 	proto      string
 	dstPort    uint32
 	dropChance float64
+	weight     int
+	burstMin   int
+	burstMax   int
 }
 
 // Generator emits synthetic flows for local development.
@@ -30,20 +33,36 @@ type Generator struct {
 	consumer FlowConsumer
 	rng      *rand.Rand
 	edges    []edge
+	totalW   int
 }
 
 func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
+	edges := []edge{
+		// Heavy internal traffic.
+		{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "reviews", proto: "TCP", dstPort: 9080, dropChance: 0.08, weight: 28, burstMin: 2, burstMax: 6},
+		{srcNS: "default", srcSvc: "frontend", dstNS: "default", dstSvc: "api", proto: "TCP", dstPort: 8080, dropChance: 0.1, weight: 24, burstMin: 2, burstMax: 5},
+		// Medium traffic.
+		{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "details", proto: "TCP", dstPort: 9080, dropChance: 0.04, weight: 14, burstMin: 1, burstMax: 3},
+		{srcNS: "demo", srcSvc: "reviews", dstNS: "demo", dstSvc: "ratings", proto: "TCP", dstPort: 9080, dropChance: 0.12, weight: 10, burstMin: 1, burstMax: 3},
+		{srcNS: "default", srcSvc: "api", dstNS: "", dstSvc: "world", proto: "TCP", dstPort: 443, dropChance: 0.06, weight: 8, burstMin: 1, burstMax: 2},
+		// Low but steady DNS.
+		{srcNS: "demo", srcSvc: "productpage", dstNS: "kube-system", dstSvc: "kube-dns", proto: "UDP", dstPort: 53, dropChance: 0.02, weight: 6, burstMin: 1, burstMax: 2},
+	}
+
+	totalWeight := 0
+	for _, e := range edges {
+		if e.weight <= 0 {
+			totalWeight++
+			continue
+		}
+		totalWeight += e.weight
+	}
+
 	return &Generator{
 		consumer: consumer,
 		rng:      rand.New(rand.NewSource(seed)),
-		edges: []edge{
-			{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "reviews", proto: "TCP", dstPort: 9080, dropChance: 0.08},
-			{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "details", proto: "TCP", dstPort: 9080, dropChance: 0.04},
-			{srcNS: "demo", srcSvc: "reviews", dstNS: "demo", dstSvc: "ratings", proto: "TCP", dstPort: 9080, dropChance: 0.12},
-			{srcNS: "demo", srcSvc: "productpage", dstNS: "kube-system", dstSvc: "kube-dns", proto: "UDP", dstPort: 53, dropChance: 0.02},
-			{srcNS: "default", srcSvc: "frontend", dstNS: "default", dstSvc: "api", proto: "TCP", dstPort: 8080, dropChance: 0.1},
-			{srcNS: "default", srcSvc: "api", dstNS: "", dstSvc: "world", proto: "TCP", dstPort: 443, dropChance: 0.06},
-		},
+		edges:    edges,
+		totalW:   totalWeight,
 	}
 }
 
@@ -56,23 +75,31 @@ func (g *Generator) Run(ctx context.Context) {
 		default:
 		}
 
-		e := g.edges[g.rng.Intn(len(g.edges))]
-		verdict := flowpb.Verdict_FORWARDED
-		if g.rng.Float64() < e.dropChance {
-			verdict = flowpb.Verdict_DROPPED
+		e := g.pickEdge()
+		burst := edgeBurstSize(g.rng, e)
+		for i := 0; i < burst; i++ {
+			verdict := flowpb.Verdict_FORWARDED
+			if g.rng.Float64() < e.dropChance {
+				verdict = flowpb.Verdict_DROPPED
+			}
+			g.consumer.AddFlow(g.makeFlow(e, verdict, counter))
+			counter++
 		}
 
-		g.consumer.AddFlow(g.makeFlow(e, verdict, counter))
-		counter++
-
 		if counter%24 == 0 {
-			for i := 0; i < 8; i++ {
-				burst := g.edges[g.rng.Intn(len(g.edges))]
-				g.consumer.AddFlow(g.makeFlow(burst, flowpb.Verdict_FORWARDED, counter+i))
+			// Periodic surges make a few paths visibly dominant in the UI.
+			surge := g.pickEdge()
+			if surge.weight < 20 {
+				// Bias surges toward known heavy links.
+				surge = g.edges[0]
+			}
+			surgeCount := 8 + g.rng.Intn(7)
+			for i := 0; i < surgeCount; i++ {
+				g.consumer.AddFlow(g.makeFlow(surge, flowpb.Verdict_FORWARDED, counter+i))
 			}
 		}
 
-		sleep := time.Duration(150+g.rng.Intn(170)) * time.Millisecond
+		sleep := time.Duration(90+g.rng.Intn(130)) * time.Millisecond
 		timer := time.NewTimer(sleep)
 		select {
 		case <-ctx.Done():
@@ -81,6 +108,55 @@ func (g *Generator) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 	}
+}
+
+func (g *Generator) pickEdge() edge {
+	if len(g.edges) == 0 {
+		return edge{}
+	}
+	if len(g.edges) == 1 {
+		return g.edges[0]
+	}
+	idx := pickWeightedEdgeIndex(g.rng, g.edges, g.totalW)
+	return g.edges[idx]
+}
+
+func pickWeightedEdgeIndex(rng *rand.Rand, edges []edge, totalWeight int) int {
+	if len(edges) == 0 {
+		return 0
+	}
+	if totalWeight <= 0 {
+		return rng.Intn(len(edges))
+	}
+
+	n := rng.Intn(totalWeight)
+	running := 0
+	for i, e := range edges {
+		w := e.weight
+		if w <= 0 {
+			w = 1
+		}
+		running += w
+		if n < running {
+			return i
+		}
+	}
+	return len(edges) - 1
+}
+
+func edgeBurstSize(rng *rand.Rand, e edge) int {
+	minBurst := e.burstMin
+	maxBurst := e.burstMax
+	if minBurst <= 0 {
+		minBurst = 1
+	}
+	if maxBurst < minBurst {
+		maxBurst = minBurst
+	}
+	if maxBurst == minBurst {
+		return minBurst
+	}
+	return minBurst + rng.Intn((maxBurst-minBurst)+1)
 }
 
 func (g *Generator) makeFlow(e edge, verdict flowpb.Verdict, seq int) *flowpb.Flow {

@@ -1,5 +1,29 @@
 import React, { useEffect, useRef } from 'react';
 
+function protocolBreakdown(link) {
+  const entries = [];
+  const mix = link?.protocolMix;
+  if (mix && typeof mix === 'object') {
+    for (const [protocol, count] of Object.entries(mix)) {
+      const numeric = Number(count);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        entries.push({ protocol: protocol.toUpperCase(), count: numeric });
+      }
+    }
+  }
+
+  if (entries.length === 0) {
+    return [{ protocol: (link?.protocol || 'unknown').toUpperCase(), count: 1, percent: 100 }];
+  }
+
+  entries.sort((a, b) => b.count - a.count || a.protocol.localeCompare(b.protocol));
+  const total = entries.reduce((sum, entry) => sum + entry.count, 0) || 1;
+  return entries.map((entry) => ({
+    ...entry,
+    percent: (entry.count / total) * 100,
+  }));
+}
+
 export default function FlowPanel({ link, onClose }) {
   const panelRef = useRef(null);
 
@@ -27,6 +51,10 @@ export default function FlowPanel({ link, onClose }) {
   const errorPct = Math.max(0, 100 - successPct);
   const verdict = link.verdict || 'unknown';
   const verdictClass = verdict === 'FORWARDED' ? 'success' : verdict === 'DROPPED' ? 'error' : 'warn';
+  const protocolMix = protocolBreakdown(link);
+  const protocolHeadline = protocolMix.length > 1
+    ? 'Mixed'
+    : protocolMix[0]?.protocol || 'UNKNOWN';
 
   return (
     <aside
@@ -56,8 +84,11 @@ export default function FlowPanel({ link, onClose }) {
 
       <div className="flow-grid">
         <div className="flow-card">
-          <div className="flow-card-label">Protocol</div>
-          <div className="flow-card-value monospace">{link.protocol || 'unknown'}</div>
+          <div className="flow-card-label">Protocol Mix</div>
+          <div className="flow-card-value monospace">{protocolHeadline}</div>
+          <div className="flow-card-subvalue">
+            {protocolMix.map((entry) => `${entry.protocol} ${entry.percent.toFixed(0)}%`).join(' · ')}
+          </div>
         </div>
         <div className="flow-card">
           <div className="flow-card-label">Flow Rate</div>

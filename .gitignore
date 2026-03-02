@@ -1,6 +1,7 @@
 # Node
 web/node_modules/
 web/.npm-cache/
+dist
 
 # Go
 /bin/

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import NetworkGraph from './components/NetworkGraph';
 import FlowPanel from './components/FlowPanel';
 import NamespaceSelector from './components/NamespaceSelector';
@@ -21,11 +21,14 @@ function getLinkKey(link) {
 export default function App() {
   const [namespace, setNamespace] = useState('');
   const [selectedLinkKey, setSelectedLinkKey] = useState(null);
+  const [layoutToastVisible, setLayoutToastVisible] = useState(false);
+  const [layoutToastKey, setLayoutToastKey] = useState(0);
   const {
     graphData,
     connected,
     trackNodePosition,
     persistNodePosition,
+    resetLayout,
   } = useFlowStream(namespace);
 
   const handleLinkClick = useCallback((link) => {
@@ -44,6 +47,22 @@ export default function App() {
     persistNodePosition(id, x, y);
   }, [persistNodePosition]);
 
+  const handleResetLayout = useCallback(() => {
+    resetLayout();
+    setLayoutToastVisible(true);
+    setLayoutToastKey((prev) => prev + 1);
+  }, [resetLayout]);
+
+  useEffect(() => {
+    if (!layoutToastVisible) {
+      return undefined;
+    }
+    const timeout = window.setTimeout(() => {
+      setLayoutToastVisible(false);
+    }, 2200);
+    return () => window.clearTimeout(timeout);
+  }, [layoutToastVisible, layoutToastKey]);
+
   const selectedLink = useMemo(() => {
     if (!selectedLinkKey) {
       return null;
@@ -59,6 +78,8 @@ export default function App() {
       droppedEdges,
     };
   }, [graphData.links, graphData.nodes.length]);
+
+  const canResetLayout = graphData.nodes.length > 0;
 
   return (
     <div className="app">
@@ -84,6 +105,14 @@ export default function App() {
         </div>
         <div className="header-controls">
           <NamespaceSelector value={namespace} onChange={setNamespace} />
+          <button
+            type="button"
+            className="layout-reset-btn"
+            onClick={handleResetLayout}
+            disabled={!canResetLayout}
+          >
+            Reset Layout
+          </button>
           <span
             className={`status ${connected ? 'connected' : 'disconnected'}`}
             role="status"
@@ -107,6 +136,16 @@ export default function App() {
           <FlowPanel link={selectedLink} onClose={handleClosePanel} />
         )}
       </main>
+      {layoutToastVisible && (
+        <div
+          key={layoutToastKey}
+          className="app-toast"
+          role="status"
+          aria-live="polite"
+        >
+          Layout reset
+        </div>
+      )}
     </div>
   );
 }

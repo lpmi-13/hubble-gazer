@@ -17,13 +17,14 @@ type Node struct {
 
 // Link represents a connection between services.
 type Link struct {
-	Source      string  `json:"source"`
-	Target      string  `json:"target"`
-	FlowRate    float64 `json:"flowRate"`    // flows per second
-	FlowCount   int     `json:"flowCount"`   // total flows in window
-	SuccessRate float64 `json:"successRate"` // fraction of FORWARDED flows
-	Protocol    string  `json:"protocol"`    // dominant protocol
-	Verdict     string  `json:"verdict"`     // dominant verdict
+	Source      string         `json:"source"`
+	Target      string         `json:"target"`
+	FlowRate    float64        `json:"flowRate"`              // flows per second
+	FlowCount   int            `json:"flowCount"`             // total flows in window
+	SuccessRate float64        `json:"successRate"`           // fraction of FORWARDED flows
+	Protocol    string         `json:"protocol"`              // dominant protocol
+	ProtocolMix map[string]int `json:"protocolMix,omitempty"` // per-protocol flow counts
+	Verdict     string         `json:"verdict"`               // dominant verdict
 }
 
 // Graph is the serialized network graph sent to the frontend.
@@ -233,11 +234,28 @@ func (a *Aggregator) Snapshot(namespace string) Graph {
 			FlowCount:   e.count,
 			SuccessRate: successRate,
 			Protocol:    dominantProto,
+			ProtocolMix: cloneProtocolCounts(e.protocol),
 			Verdict:     verdict,
 		})
 	}
 
 	return Graph{Nodes: nodes, Links: links}
+}
+
+func cloneProtocolCounts(protocols map[string]int) map[string]int {
+	if len(protocols) == 0 {
+		return nil
+	}
+	copied := make(map[string]int, len(protocols))
+	for protocol, count := range protocols {
+		if count > 0 {
+			copied[protocol] = count
+		}
+	}
+	if len(copied) == 0 {
+		return nil
+	}
+	return copied
 }
 
 // serviceLabel extracts a human-readable service name from a Hubble endpoint.

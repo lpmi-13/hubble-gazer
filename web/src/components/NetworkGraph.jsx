@@ -1,5 +1,16 @@
 import React, { useRef, useCallback, useEffect, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
+import {
+  PROTOCOL_LEGEND,
+  edgeWidth,
+  errorRatio,
+  particleColor,
+  particleRadius,
+  particleSpeed,
+  protocolColor,
+  protocolDistribution,
+  trafficParticleCount,
+} from './graphEncoding';
 
 const NAMESPACE_COLORS = {
   'demo': '#58a6ff',
@@ -9,14 +20,116 @@ const NAMESPACE_COLORS = {
 
 const DEFAULT_COLOR = '#8b949e';
 
+const NODE_RADIUS = 10;
+const MIN_POINTER_RADIUS = 24;
+const MIN_POINTER_RADIUS_COARSE = 38;
+const EDGE_CURVATURE = 0.1;
+const EDGE_PARTICLE_PADDING = 0.06;
+
+function isCoarsePointer() {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(pointer: coarse)').matches;
+}
+
+function getNodeRadius() {
+  return NODE_RADIUS;
+}
+
 function getNodeColor(node) {
   return NAMESPACE_COLORS[node.namespace] || DEFAULT_COLOR;
 }
 
-function getParticleColor(link) {
-  if (link.verdict === 'DROPPED') return '#f85149';
-  if (link.protocol === 'UDP') return '#79c0ff';
-  return '#3fb950';
+function getLinkEndpoints(link) {
+  const source = link?.source;
+  const target = link?.target;
+  if (!source || !target) {
+    return null;
+  }
+  const sourceX = Number(source.x);
+  const sourceY = Number(source.y);
+  const targetX = Number(target.x);
+  const targetY = Number(target.y);
+
+  if (!Number.isFinite(sourceX) || !Number.isFinite(sourceY) || !Number.isFinite(targetX) || !Number.isFinite(targetY)) {
+    return null;
+  }
+
+  return {
+    source: { x: sourceX, y: sourceY },
+    target: { x: targetX, y: targetY },
+  };
+}
+
+function controlPointForCurve(source, target, curvature) {
+  const dx = target.x - source.x;
+  const dy = target.y - source.y;
+  const distance = Math.hypot(dx, dy) || 1;
+  const normalX = -dy / distance;
+  const normalY = dx / distance;
+  const midpointX = (source.x + target.x) / 2;
+  const midpointY = (source.y + target.y) / 2;
+  const offset = distance * curvature;
+
+  return {
+    x: midpointX + normalX * offset,
+    y: midpointY + normalY * offset,
+  };
+}
+
+function pointOnQuadraticCurve(start, control, end, t) {
+  const inverse = 1 - t;
+  return {
+    x: (inverse * inverse * start.x) + (2 * inverse * t * control.x) + (t * t * end.x),
+    y: (inverse * inverse * start.y) + (2 * inverse * t * control.y) + (t * t * end.y),
+  };
+}
+
+function drawCurveSegment(ctx, start, control, end, t0, t1) {
+  const delta = Math.max(0, t1 - t0);
+  const steps = Math.max(6, Math.ceil(delta * 36));
+
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const t = t0 + (delta * (i / steps));
+    const point = pointOnQuadraticCurve(start, control, end, t);
+    if (i === 0) {
+      ctx.moveTo(point.x, point.y);
+    } else {
+      ctx.lineTo(point.x, point.y);
+    }
+  }
+  ctx.stroke();
+}
+
+function drawParticlesOnCurve(ctx, start, control, end, link, nowMs) {
+  const count = trafficParticleCount(link);
+  if (count <= 0) {
+    return;
+  }
+
+  const speed = particleSpeed(link);
+  const offset = ((nowMs / 1000) * speed) % 1;
+  const radius = particleRadius(link);
+  const color = particleColor(link);
+  const span = 1 - (EDGE_PARTICLE_PADDING * 2);
+
+  ctx.fillStyle = color;
+  for (let i = 0; i < count; i++) {
+    const t = EDGE_PARTICLE_PADDING + (((offset + (i / count)) % 1) * span);
+    const point = pointOnQuadraticCurve(start, control, end, t);
+
+    ctx.globalAlpha = 0.26;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, radius * 1.95, 0, 2 * Math.PI);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.98;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, radius, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
 }
 
 export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePositionChange }) {
@@ -79,7 +192,7 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
   const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
     const label = node.label || node.id;
     const fontSize = Math.max(12 / globalScale, 3);
-    const nodeSize = Math.max(4, Math.sqrt(node.traffic || 1) * 2);
+    const nodeSize = getNodeRadius(node);
     const color = getNodeColor(node);
 
     // Draw node circle
@@ -106,9 +219,12 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
   }, []);
 
   const nodePointerAreaPaint = useCallback((node, color, ctx) => {
-    const nodeSize = Math.max(4, Math.sqrt(node.traffic || 1) * 2);
+    const nodeSize = getNodeRadius(node);
+    const minRadiusPx = isCoarsePointer() ? MIN_POINTER_RADIUS_COARSE : MIN_POINTER_RADIUS;
+    const zoom = graphRef.current?.zoom?.() || 1;
+    const pointerRadius = Math.max(nodeSize + 5, minRadiusPx / Math.max(zoom, 0.001));
     ctx.beginPath();
-    ctx.arc(node.x, node.y, nodeSize + 5, 0, 2 * Math.PI);
+    ctx.arc(node.x, node.y, pointerRadius, 0, 2 * Math.PI);
     ctx.fillStyle = color;
     ctx.fill();
   }, []);
@@ -118,8 +234,6 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
       return;
     }
     setIsDragging(true);
-    node.fx = node.x;
-    node.fy = node.y;
     if (onNodeDrag) {
       onNodeDrag(node.id, node.x, node.y);
     }
@@ -136,6 +250,51 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
       onNodePositionChange(node.id, node.x, node.y);
     }
   }, [onNodePositionChange]);
+
+  const linkCanvasObject = useCallback((link, ctx) => {
+    const endpoints = getLinkEndpoints(link);
+    if (!endpoints) {
+      return;
+    }
+
+    const { source, target } = endpoints;
+    const width = edgeWidth(link);
+    const control = controlPointForCurve(source, target, EDGE_CURVATURE);
+    const distribution = protocolDistribution(link);
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    let startT = 0;
+    const finalIndex = distribution.length - 1;
+    for (let i = 0; i < distribution.length; i++) {
+      const segment = distribution[i];
+      const endT = i === finalIndex ? 1 : Math.min(1, startT + segment.share);
+      if (endT <= startT) {
+        continue;
+      }
+
+      ctx.strokeStyle = protocolColor(segment.protocol);
+      ctx.lineWidth = width;
+      drawCurveSegment(ctx, source, control, target, startT, endT);
+      startT = endT;
+    }
+
+    const dropRatio = errorRatio(link);
+    if (dropRatio > 0.001) {
+      ctx.strokeStyle = `rgba(248, 81, 73, ${0.24 + (dropRatio * 0.5)})`;
+      ctx.lineWidth = Math.max(1, width * 0.38);
+      ctx.setLineDash([7, 5]);
+      drawCurveSegment(ctx, source, control, target, 0, 1);
+      ctx.setLineDash([]);
+    }
+
+    drawParticlesOnCurve(ctx, source, control, target, link, nowMs);
+
+    ctx.restore();
+  }, []);
 
   const showLoading = !hasReceivedData && data.nodes.length === 0;
   const showEmpty = hasReceivedData && data.nodes.length === 0;
@@ -155,25 +314,49 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
           nodeId="id"
           nodeCanvasObject={nodeCanvasObject}
           nodePointerAreaPaint={nodePointerAreaPaint}
-          linkColor={() => '#2f4c65'}
-          linkWidth={(link) => Math.max(1, Math.log2((link.flowRate || 0) + 1) * 2)}
-          linkDirectionalParticles={(link) => Math.ceil(link.flowRate || 0)}
-          linkDirectionalParticleWidth={(link) =>
-            Math.max(2, Math.sqrt(link.flowRate || 0) * 3)
-          }
-          linkDirectionalParticleSpeed={0.005}
-          linkDirectionalParticleColor={getParticleColor}
-          linkCurvature={0.1}
+          linkCanvasObject={linkCanvasObject}
+          linkCanvasObjectMode={() => 'replace'}
+          linkWidth={edgeWidth}
+          linkCurvature={EDGE_CURVATURE}
+          autoPauseRedraw={false}
+          enableNodeDrag
           onLinkClick={onLinkClick}
           onNodeDrag={handleNodeDrag}
           onNodeDragEnd={handleNodeDragEnd}
           onBackgroundClick={() => setIsDragging(false)}
-          d3AlphaDecay={0.0228}
-          d3VelocityDecay={0.4}
-          cooldownTicks={50}
-          warmupTicks={20}
+          d3AlphaDecay={1}
+          d3VelocityDecay={1}
+          cooldownTicks={0}
+          warmupTicks={0}
         />
       )}
+      <aside className="graph-legend" aria-label="Graph legend">
+        <p className="graph-legend-title">Legend</p>
+        <div className="graph-legend-row">
+          <span className="graph-legend-swatch graph-legend-swatch-traffic" />
+          More particles = more traffic
+        </div>
+        <div className="graph-legend-row">
+          <span className="graph-legend-swatch graph-legend-swatch-particle" />
+          Particle motion = flow direction
+        </div>
+        <div className="graph-legend-row">
+          <span className="graph-legend-swatch graph-legend-swatch-drop" />
+          Red dashed overlay = dropped traffic
+        </div>
+        <div className="graph-legend-row graph-legend-row-protocols">
+          <span className="graph-legend-swatch graph-legend-swatch-mixed" />
+          Protocol colors:
+          <div className="graph-legend-protocol-list">
+            {PROTOCOL_LEGEND.map((item) => (
+              <span className="graph-legend-protocol-item" key={item.protocol}>
+                <span className="graph-legend-protocol-dot" style={{ backgroundColor: item.color }} />
+                {item.protocol}
+              </span>
+            ))}
+          </div>
+        </div>
+      </aside>
       {showLoading && (
         <div className="graph-overlay" aria-live="polite">
           <div className="graph-loading">
