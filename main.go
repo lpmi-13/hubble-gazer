@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -19,9 +17,6 @@ import (
 	"github.com/iximiuz/hubble-gazer/hubble"
 	"github.com/iximiuz/hubble-gazer/mock"
 )
-
-//go:embed web/dist/*
-var frontendFS embed.FS
 
 var validNamespace = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
@@ -114,20 +109,9 @@ func main() {
 		}
 	})
 
-	distFS, err := fs.Sub(frontendFS, "web/dist")
-	if err != nil {
-		log.Fatalf("failed to create sub filesystem: %v", err)
+	if err := registerFrontendRoutes(mux); err != nil {
+		log.Fatalf("failed to register frontend routes: %v", err)
 	}
-	fileServer := http.FileServer(http.FS(distFS))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		f, err := distFS.Open(r.URL.Path[1:])
-		if err != nil {
-			r.URL.Path = "/"
-		} else {
-			_ = f.Close()
-		}
-		fileServer.ServeHTTP(w, r)
-	})
 
 	limiter := newIPRateLimiter(60, 10)
 	go limiter.cleanup(5 * time.Minute)

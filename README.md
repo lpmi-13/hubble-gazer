@@ -50,14 +50,16 @@ make build-web
 ## Manual Development (without Make)
 
 ```bash
-# terminal 1 (backend)
-FLOW_SOURCE=mock LISTEN_ADDR=:3000 go run .
+# terminal 1 (backend in dev mode; no web/dist required)
+FLOW_SOURCE=mock LISTEN_ADDR=:3000 go run -tags dev .
 
 # terminal 2 (frontend)
 cd web
 npm install
 npm run dev
 ```
+
+`go run .` (without `-tags dev`) builds the production server, which serves embedded static assets and expects files under `web/dist`.
 
 ## Container Build
 

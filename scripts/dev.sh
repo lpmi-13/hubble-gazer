@@ -43,7 +43,7 @@ fi
 echo "[dev] starting backend (FLOW_SOURCE=${MODE}) on http://localhost:${BACKEND_PORT}"
 (
   cd "${ROOT_DIR}"
-  FLOW_SOURCE="${MODE}" LISTEN_ADDR="${LISTEN_ADDR}" CORS_ALLOWED_ORIGIN="http://localhost:${FRONTEND_PORT}" go run .
+  FLOW_SOURCE="${MODE}" LISTEN_ADDR="${LISTEN_ADDR}" CORS_ALLOWED_ORIGIN="http://localhost:${FRONTEND_PORT}" go run -tags dev .
 ) &
 BACKEND_PID=$!
 
