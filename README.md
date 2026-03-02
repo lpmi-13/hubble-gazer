@@ -2,6 +2,12 @@
 
 Realtime Kubernetes network traffic visualization for clusters running Cilium + Hubble.
 
+## Demo
+
+This is what runs locally when you run with `make dev` (it has sample data)
+
+[demo.webm](https://github.com/user-attachments/assets/5cf1224a-2766-4d2d-95e4-ce224be5b655)
+
 ## What It Does
 - Connects to Hubble Relay over gRPC (live mode)
 - Generates synthetic flows for local development (mock mode)
