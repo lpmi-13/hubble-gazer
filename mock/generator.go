@@ -30,10 +30,11 @@ type edge struct {
 
 // Generator emits synthetic flows for local development.
 type Generator struct {
-	consumer FlowConsumer
-	rng      *rand.Rand
-	edges    []edge
-	totalW   int
+	consumer      FlowConsumer
+	rng           *rand.Rand
+	edges         []edge
+	totalW        int
+	replicaCounts map[string]int
 }
 
 func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
@@ -58,11 +59,15 @@ func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
 		totalWeight += e.weight
 	}
 
+	rng := rand.New(rand.NewSource(seed))
+	replicaCounts := buildReplicaCounts(rng, edges)
+
 	return &Generator{
-		consumer: consumer,
-		rng:      rand.New(rand.NewSource(seed)),
-		edges:    edges,
-		totalW:   totalWeight,
+		consumer:      consumer,
+		rng:           rng,
+		edges:         edges,
+		totalW:        totalWeight,
+		replicaCounts: replicaCounts,
 	}
 }
 
@@ -160,8 +165,8 @@ func edgeBurstSize(rng *rand.Rand, e edge) int {
 }
 
 func (g *Generator) makeFlow(e edge, verdict flowpb.Verdict, seq int) *flowpb.Flow {
-	src := endpoint(e.srcNS, e.srcSvc, g.rng.Intn(4))
-	dst := endpoint(e.dstNS, e.dstSvc, g.rng.Intn(4))
+	src := endpoint(e.srcNS, e.srcSvc, g.randomReplicaIndex(e.srcNS, e.srcSvc))
+	dst := endpoint(e.dstNS, e.dstSvc, g.randomReplicaIndex(e.dstNS, e.dstSvc))
 	if e.dstSvc == "world" {
 		dst = &flowpb.Endpoint{Identity: 1}
 	}
@@ -194,6 +199,41 @@ func endpoint(namespace, service string, idx int) *flowpb.Endpoint {
 		PodName:   fmt.Sprintf("%s-%d", service, idx),
 		Labels:    []string{"app=" + service},
 	}
+}
+
+func buildReplicaCounts(rng *rand.Rand, edges []edge) map[string]int {
+	counts := make(map[string]int)
+	for _, e := range edges {
+		assignReplicaCount(counts, rng, e.srcNS, e.srcSvc)
+		assignReplicaCount(counts, rng, e.dstNS, e.dstSvc)
+	}
+	return counts
+}
+
+func assignReplicaCount(counts map[string]int, rng *rand.Rand, namespace, service string) {
+	if service == "" || service == "world" {
+		return
+	}
+	key := replicaKey(namespace, service)
+	if _, exists := counts[key]; exists {
+		return
+	}
+	counts[key] = 1 + rng.Intn(4)
+}
+
+func replicaKey(namespace, service string) string {
+	if namespace == "" {
+		return service
+	}
+	return namespace + "/" + service
+}
+
+func (g *Generator) randomReplicaIndex(namespace, service string) int {
+	count := g.replicaCounts[replicaKey(namespace, service)]
+	if count <= 1 {
+		return 0
+	}
+	return g.rng.Intn(count)
 }
 
 func randomSrcPort(rng *rand.Rand) uint32 {

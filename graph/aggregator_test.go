@@ -54,14 +54,96 @@ func TestSnapshotProtocolMixWorksWithNamespaceFilter(t *testing.T) {
 	}
 }
 
+func TestSnapshotWithOptionsPodViewUsesPodIdentity(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlowWithPods("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.Verdict_FORWARDED, "TCP"))
+	aggregator.AddFlow(newFlowWithPods("demo", "frontend", "frontend-1", "demo", "api", "api-0", flowpb.Verdict_FORWARDED, "TCP"))
+
+	snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		ViewMode: ViewModePod,
+	})
+
+	if snapshot.ViewMode != ViewModePod {
+		t.Fatalf("expected view mode pod, got %q", snapshot.ViewMode)
+	}
+	if len(snapshot.Nodes) != 3 {
+		t.Fatalf("expected 3 pod nodes, got %d", len(snapshot.Nodes))
+	}
+	if len(snapshot.Links) != 2 {
+		t.Fatalf("expected 2 pod links, got %d", len(snapshot.Links))
+	}
+}
+
+func TestSnapshotWithOptionsPodViewAppliesTopNTruncation(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlowWithPods("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.Verdict_FORWARDED, "TCP"))
+	aggregator.AddFlow(newFlowWithPods("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.Verdict_FORWARDED, "TCP"))
+	aggregator.AddFlow(newFlowWithPods("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.Verdict_FORWARDED, "TCP"))
+	aggregator.AddFlow(newFlowWithPods("demo", "frontend", "frontend-0", "demo", "api", "api-1", flowpb.Verdict_FORWARDED, "TCP"))
+	aggregator.AddFlow(newFlowWithPods("demo", "frontend", "frontend-1", "demo", "api", "api-2", flowpb.Verdict_FORWARDED, "TCP"))
+
+	snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		ViewMode:    ViewModePod,
+		PodMaxNodes: 2,
+	})
+
+	if snapshot.Truncation == nil {
+		t.Fatalf("expected truncation metadata")
+	}
+	if snapshot.Truncation.Reason != "top_pods_by_traffic" {
+		t.Fatalf("unexpected truncation reason %q", snapshot.Truncation.Reason)
+	}
+	if snapshot.Truncation.Limit != 2 {
+		t.Fatalf("expected limit 2, got %d", snapshot.Truncation.Limit)
+	}
+	if snapshot.Truncation.TotalNodes != 5 {
+		t.Fatalf("expected total nodes 5, got %d", snapshot.Truncation.TotalNodes)
+	}
+	if snapshot.Truncation.ShownNodes != 2 {
+		t.Fatalf("expected shown nodes 2, got %d", snapshot.Truncation.ShownNodes)
+	}
+	if len(snapshot.Nodes) != 2 {
+		t.Fatalf("expected 2 nodes after truncation, got %d", len(snapshot.Nodes))
+	}
+	kept := make(map[string]struct{}, len(snapshot.Nodes))
+	for _, node := range snapshot.Nodes {
+		kept[node.ID] = struct{}{}
+	}
+	for _, link := range snapshot.Links {
+		if _, ok := kept[link.Source]; !ok {
+			t.Fatalf("unexpected source after truncation: %s", link.Source)
+		}
+		if _, ok := kept[link.Target]; !ok {
+			t.Fatalf("unexpected link after truncation: %s -> %s", link.Source, link.Target)
+		}
+	}
+}
+
 func newFlow(srcNS, srcApp, dstNS, dstApp string, verdict flowpb.Verdict, protocol string) *flowpb.Flow {
+	return newFlowWithPods(
+		srcNS,
+		srcApp,
+		srcApp+"-0",
+		dstNS,
+		dstApp,
+		dstApp+"-0",
+		verdict,
+		protocol,
+	)
+}
+
+func newFlowWithPods(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod string, verdict flowpb.Verdict, protocol string) *flowpb.Flow {
 	return &flowpb.Flow{
 		Source: &flowpb.Endpoint{
 			Namespace: srcNS,
+			PodName:   srcPod,
 			Labels:    []string{"app=" + srcApp},
 		},
 		Destination: &flowpb.Endpoint{
 			Namespace: dstNS,
+			PodName:   dstPod,
 			Labels:    []string{"app=" + dstApp},
 		},
 		Verdict: verdict,

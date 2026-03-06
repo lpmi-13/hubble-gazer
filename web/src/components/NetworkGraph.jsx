@@ -25,6 +25,10 @@ const MIN_POINTER_RADIUS = 24;
 const MIN_POINTER_RADIUS_COARSE = 38;
 const EDGE_CURVATURE = 0.1;
 const EDGE_PARTICLE_PADDING = 0.06;
+const LAYOUT_EASING = 0.32;
+const LAYOUT_MAX_STEP = 20;
+const LAYOUT_MIN_STEP = 0.35;
+const LAYOUT_SNAP_EPSILON = 0.25;
 
 function isCoarsePointer() {
   return typeof window !== 'undefined'
@@ -135,6 +139,8 @@ function drawParticlesOnCurve(ctx, start, control, end, link, nowMs) {
 export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePositionChange }) {
   const graphRef = useRef();
   const containerRef = useRef();
+  const graphNodesRef = useRef([]);
+  const draggingNodeIdRef = useRef(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [hasReceivedData, setHasReceivedData] = useState(false);
@@ -144,6 +150,81 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
       setHasReceivedData(true);
     }
   }, [data.nodes.length, hasReceivedData]);
+
+  useEffect(() => {
+    graphNodesRef.current = Array.isArray(data.nodes) ? data.nodes : [];
+  }, [data.nodes]);
+
+  useEffect(() => {
+    let rafId = 0;
+
+    const tick = () => {
+      const nodes = graphNodesRef.current;
+      const draggedId = draggingNodeIdRef.current;
+      let moved = false;
+
+      for (const node of nodes) {
+        if (!node || node.id === draggedId) {
+          continue;
+        }
+
+        const targetX = Number(node.layoutTargetX);
+        const targetY = Number(node.layoutTargetY);
+        if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
+          continue;
+        }
+
+        if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+          node.x = targetX;
+          node.y = targetY;
+          node.fx = targetX;
+          node.fy = targetY;
+          node.vx = 0;
+          node.vy = 0;
+          moved = true;
+          continue;
+        }
+
+        const dx = targetX - node.x;
+        const dy = targetY - node.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance <= LAYOUT_SNAP_EPSILON) {
+          if (distance > 0) {
+            node.x = targetX;
+            node.y = targetY;
+            node.fx = targetX;
+            node.fy = targetY;
+            node.vx = 0;
+            node.vy = 0;
+            moved = true;
+          }
+          continue;
+        }
+
+        const step = Math.min(LAYOUT_MAX_STEP, Math.max(LAYOUT_MIN_STEP, distance * LAYOUT_EASING));
+        const ratio = step / distance;
+        node.x += dx * ratio;
+        node.y += dy * ratio;
+        node.fx = node.x;
+        node.fy = node.y;
+        node.vx = 0;
+        node.vy = 0;
+        moved = true;
+      }
+
+      if (moved) {
+        graphRef.current?.refresh?.();
+      }
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => {
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -234,6 +315,9 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
       return;
     }
     setIsDragging(true);
+    draggingNodeIdRef.current = node.id;
+    node.layoutTargetX = node.x;
+    node.layoutTargetY = node.y;
     if (onNodeDrag) {
       onNodeDrag(node.id, node.x, node.y);
     }
@@ -242,10 +326,14 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
   const handleNodeDragEnd = useCallback((node) => {
     setIsDragging(false);
     if (!node) {
+      draggingNodeIdRef.current = null;
       return;
     }
+    draggingNodeIdRef.current = null;
     node.fx = node.x;
     node.fy = node.y;
+    node.layoutTargetX = node.x;
+    node.layoutTargetY = node.y;
     if (onNodePositionChange) {
       onNodePositionChange(node.id, node.x, node.y);
     }

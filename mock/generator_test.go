@@ -48,3 +48,45 @@ func TestEdgeBurstSizeWithinConfiguredBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildReplicaCountsWithinExpectedBounds(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	edges := []edge{
+		{srcNS: "demo", srcSvc: "frontend", dstNS: "demo", dstSvc: "api"},
+		{srcNS: "demo", srcSvc: "api", dstNS: "demo", dstSvc: "db"},
+		{srcNS: "demo", srcSvc: "frontend", dstNS: "", dstSvc: "world"},
+	}
+
+	counts := buildReplicaCounts(rng, edges)
+	if len(counts) != 3 {
+		t.Fatalf("expected 3 replica count entries, got %d", len(counts))
+	}
+
+	for key, count := range counts {
+		if count < 1 || count > 4 {
+			t.Fatalf("expected replica count between 1 and 4 for %s, got %d", key, count)
+		}
+	}
+}
+
+func TestRandomReplicaIndexStaysWithinServiceReplicaCount(t *testing.T) {
+	g := &Generator{
+		rng: rand.New(rand.NewSource(3)),
+		replicaCounts: map[string]int{
+			replicaKey("demo", "frontend"): 3,
+		},
+	}
+
+	seen := map[int]bool{}
+	for i := 0; i < 300; i++ {
+		idx := g.randomReplicaIndex("demo", "frontend")
+		if idx < 0 || idx > 2 {
+			t.Fatalf("expected index between 0 and 2, got %d", idx)
+		}
+		seen[idx] = true
+	}
+
+	if len(seen) < 2 {
+		t.Fatalf("expected multiple replica indices to appear, got %v", seen)
+	}
+}

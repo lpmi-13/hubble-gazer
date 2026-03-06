@@ -102,6 +102,59 @@ test('mergeGraphUpdate updates live link metrics in place', () => {
   assert.equal(link.verdict, 'DROPPED');
 });
 
+test('mergeGraphUpdate computes separated layout targets during live updates', () => {
+  const left = {
+    id: 'demo/reviews-0',
+    label: 'reviews-0',
+    namespace: 'demo',
+    traffic: 2,
+    x: 0,
+    y: 0,
+    fx: 0,
+    fy: 0,
+    vx: 0,
+    vy: 0,
+  };
+  const right = {
+    id: 'demo/reviews-1',
+    label: 'reviews-1',
+    namespace: 'demo',
+    traffic: 2,
+    x: 0,
+    y: 0,
+    fx: 0,
+    fy: 0,
+    vx: 0,
+    vy: 0,
+  };
+
+  const prev = {
+    nodes: [left, right],
+    links: [],
+  };
+  const incoming = {
+    nodes: [
+      { id: left.id, label: left.label, namespace: left.namespace, traffic: 3 },
+      { id: right.id, label: right.label, namespace: right.namespace, traffic: 3 },
+    ],
+    links: [],
+  };
+
+  const next = mergeGraphUpdate(prev, incoming, new Map(), new Set());
+  assert.equal(next.nodes.length, 2);
+  const minDistance = nodeRadius(left) + nodeRadius(right) + 8;
+  const targetDistance = Math.hypot(
+    left.layoutTargetX - right.layoutTargetX,
+    left.layoutTargetY - right.layoutTargetY,
+  );
+
+  assert.ok(targetDistance >= minDistance - 0.15);
+  assert.equal(left.x, 0);
+  assert.equal(left.y, 0);
+  assert.equal(right.x, 0);
+  assert.equal(right.y, 0);
+});
+
 test('resolveDraggedNodeOverlap nudges dragged node away without moving neighbors', () => {
   const neighbor = { id: 'demo/reviews', traffic: 100, x: 0, y: 0, fx: 0, fy: 0, vx: 0, vy: 0 };
   const dragged = { id: 'demo/details', traffic: 100, x: 0, y: 0, fx: 0, fy: 0, vx: 0, vy: 0 };

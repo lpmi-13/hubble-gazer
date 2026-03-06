@@ -4,6 +4,11 @@ import FlowPanel from './components/FlowPanel';
 import NamespaceSelector from './components/NamespaceSelector';
 import { useFlowStream } from './hooks/useFlowStream';
 
+const VIEW_MODES = Object.freeze({
+  service: 'service',
+  pod: 'pod',
+});
+
 function getEndpointId(endpoint) {
   if (endpoint && typeof endpoint === 'object') {
     return endpoint.id || endpoint.label;
@@ -20,16 +25,18 @@ function getLinkKey(link) {
 
 export default function App() {
   const [namespace, setNamespace] = useState('');
+  const [viewMode, setViewMode] = useState(VIEW_MODES.service);
   const [selectedLinkKey, setSelectedLinkKey] = useState(null);
   const [layoutToastVisible, setLayoutToastVisible] = useState(false);
   const [layoutToastKey, setLayoutToastKey] = useState(0);
   const {
     graphData,
     connected,
+    truncation,
     trackNodePosition,
     persistNodePosition,
     resetLayout,
-  } = useFlowStream(namespace);
+  } = useFlowStream(namespace, viewMode);
 
   const handleLinkClick = useCallback((link) => {
     setSelectedLinkKey(getLinkKey(link));
@@ -46,6 +53,14 @@ export default function App() {
   const handleNodePositionChange = useCallback((id, x, y) => {
     persistNodePosition(id, x, y);
   }, [persistNodePosition]);
+
+  const handleViewModeChange = useCallback((mode) => {
+    if (mode === viewMode) {
+      return;
+    }
+    setViewMode(mode);
+    setSelectedLinkKey(null);
+  }, [viewMode]);
 
   const handleResetLayout = useCallback(() => {
     resetLayout();
@@ -80,6 +95,13 @@ export default function App() {
   }, [graphData.links, graphData.nodes.length]);
 
   const canResetLayout = graphData.nodes.length > 0;
+  const isPodMode = viewMode === VIEW_MODES.pod;
+  const graphHint = isPodMode
+    ? 'Pod view is live and can be dense; drag nodes to pin key workloads while telemetry continues streaming.'
+    : 'Drag nodes to pin placement while telemetry continues streaming.';
+  const truncationNotice = isPodMode && truncation
+    ? `Showing top ${truncation.limit} pods by traffic (${truncation.shownNodes}/${truncation.totalNodes}).`
+    : null;
 
   return (
     <div className="app">
@@ -105,6 +127,26 @@ export default function App() {
         </div>
         <div className="header-controls">
           <NamespaceSelector value={namespace} onChange={setNamespace} />
+          <div className="view-mode-toggle" role="tablist" aria-label="Graph view mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === VIEW_MODES.service}
+              className={`view-mode-btn ${viewMode === VIEW_MODES.service ? 'active' : ''}`}
+              onClick={() => handleViewModeChange(VIEW_MODES.service)}
+            >
+              Services
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === VIEW_MODES.pod}
+              className={`view-mode-btn ${viewMode === VIEW_MODES.pod ? 'active' : ''}`}
+              onClick={() => handleViewModeChange(VIEW_MODES.pod)}
+            >
+              Pods
+            </button>
+          </div>
           <button
             type="button"
             className="layout-reset-btn"
@@ -130,7 +172,12 @@ export default function App() {
             onNodeDrag={handleNodeDrag}
             onNodePositionChange={handleNodePositionChange}
           />
-          <p className="graph-hint">Drag nodes to pin placement while telemetry continues streaming.</p>
+          {truncationNotice && (
+            <p className="graph-truncation-notice" role="status" aria-live="polite">
+              {truncationNotice}
+            </p>
+          )}
+          <p className="graph-hint">{graphHint}</p>
         </section>
         {selectedLink && (
           <FlowPanel link={selectedLink} onClose={handleClosePanel} />

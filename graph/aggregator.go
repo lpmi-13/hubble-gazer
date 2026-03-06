@@ -1,13 +1,38 @@
 package graph
 
 import (
+	"sort"
 	"sync"
 	"time"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 )
 
-// Node represents a service in the graph.
+type ViewMode string
+
+const (
+	ViewModeService ViewMode = "service"
+	ViewModePod     ViewMode = "pod"
+)
+
+func ParseViewMode(value string) (ViewMode, bool) {
+	switch ViewMode(value) {
+	case ViewModeService:
+		return ViewModeService, true
+	case ViewModePod:
+		return ViewModePod, true
+	default:
+		return ViewModeService, false
+	}
+}
+
+type SnapshotOptions struct {
+	Namespace   string
+	ViewMode    ViewMode
+	PodMaxNodes int
+}
+
+// Node represents a graph node (service or pod depending on view mode).
 type Node struct {
 	ID        string `json:"id"`
 	Label     string `json:"label"`
@@ -29,20 +54,29 @@ type Link struct {
 
 // Graph is the serialized network graph sent to the frontend.
 type Graph struct {
-	Nodes []Node `json:"nodes"`
-	Links []Link `json:"links"`
+	Nodes      []Node      `json:"nodes"`
+	Links      []Link      `json:"links"`
+	ViewMode   ViewMode    `json:"viewMode"`
+	Truncation *Truncation `json:"truncation,omitempty"`
+}
+
+type Truncation struct {
+	Reason     string `json:"reason"`
+	Limit      int    `json:"limit"`
+	TotalNodes int    `json:"totalNodes"`
+	ShownNodes int    `json:"shownNodes"`
 }
 
 type flowRecord struct {
-	timestamp time.Time
-	srcID     string
-	dstID     string
-	srcNS     string
-	dstNS     string
-	srcLabel  string
-	dstLabel  string
-	verdict   flowpb.Verdict
-	protocol  string
+	timestamp  time.Time
+	srcNS      string
+	dstNS      string
+	srcService string
+	dstService string
+	srcPod     string
+	dstPod     string
+	verdict    flowpb.Verdict
+	protocol   string
 }
 
 // Aggregator collects flows and produces a service graph.
@@ -73,20 +107,13 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 
 	srcNS := src.GetNamespace()
 	dstNS := dst.GetNamespace()
-	srcLabel := serviceLabel(src)
-	dstLabel := serviceLabel(dst)
+	srcService := serviceLabel(src)
+	dstService := serviceLabel(dst)
+	srcPod := podLabel(src)
+	dstPod := podLabel(dst)
 
-	if srcLabel == "" || dstLabel == "" {
+	if srcService == "" || dstService == "" {
 		return
-	}
-
-	srcID := srcNS + "/" + srcLabel
-	dstID := dstNS + "/" + dstLabel
-	if srcNS == "" {
-		srcID = srcLabel
-	}
-	if dstNS == "" {
-		dstID = dstLabel
 	}
 
 	proto := "unknown"
@@ -101,15 +128,15 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 	}
 
 	record := flowRecord{
-		timestamp: time.Now(),
-		srcID:     srcID,
-		dstID:     dstID,
-		srcNS:     srcNS,
-		dstNS:     dstNS,
-		srcLabel:  srcLabel,
-		dstLabel:  dstLabel,
-		verdict:   flow.GetVerdict(),
-		protocol:  proto,
+		timestamp:  time.Now(),
+		srcNS:      srcNS,
+		dstNS:      dstNS,
+		srcService: srcService,
+		dstService: dstService,
+		srcPod:     srcPod,
+		dstPod:     dstPod,
+		verdict:    flow.GetVerdict(),
+		protocol:   proto,
 	}
 
 	a.mu.Lock()
@@ -142,6 +169,19 @@ func (a *Aggregator) Namespaces() []string {
 
 // Snapshot returns the current service graph, optionally filtered by namespace.
 func (a *Aggregator) Snapshot(namespace string) Graph {
+	return a.SnapshotWithOptions(SnapshotOptions{
+		Namespace: namespace,
+		ViewMode:  ViewModeService,
+	})
+}
+
+// SnapshotWithOptions returns the current graph for a given view mode.
+func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
+	viewMode := options.ViewMode
+	if viewMode != ViewModePod {
+		viewMode = ViewModeService
+	}
+
 	a.mu.Lock()
 	cutoff := time.Now().Add(-a.window)
 	// Prune old flows
@@ -157,20 +197,25 @@ func (a *Aggregator) Snapshot(namespace string) Graph {
 	// Copy relevant flows
 	filtered := make([]flowRecord, 0, len(a.flows))
 	for _, f := range a.flows {
-		if namespace == "" || f.srcNS == namespace || f.dstNS == namespace {
+		if options.Namespace == "" || f.srcNS == options.Namespace || f.dstNS == options.Namespace {
 			filtered = append(filtered, f)
 		}
 	}
 	a.mu.Unlock()
 
 	if len(filtered) == 0 {
-		return Graph{Nodes: []Node{}, Links: []Link{}}
+		return Graph{
+			Nodes:    []Node{},
+			Links:    []Link{},
+			ViewMode: viewMode,
+		}
 	}
 
 	windowSecs := a.window.Seconds()
 
 	// Build nodes and links
 	nodeMap := make(map[string]*Node)
+	nodeTraffic := make(map[string]int)
 	type edgeKey struct{ src, dst string }
 	edgeMap := make(map[edgeKey]*struct {
 		count     int
@@ -179,15 +224,25 @@ func (a *Aggregator) Snapshot(namespace string) Graph {
 	})
 
 	for _, f := range filtered {
-		if _, ok := nodeMap[f.srcID]; !ok {
-			nodeMap[f.srcID] = &Node{ID: f.srcID, Label: f.srcLabel, Namespace: f.srcNS}
+		srcLabel, dstLabel := labelsForView(f, viewMode)
+		if srcLabel == "" || dstLabel == "" {
+			continue
 		}
-		if _, ok := nodeMap[f.dstID]; !ok {
-			nodeMap[f.dstID] = &Node{ID: f.dstID, Label: f.dstLabel, Namespace: f.dstNS}
-		}
-		nodeMap[f.dstID].Traffic++
 
-		key := edgeKey{f.srcID, f.dstID}
+		srcID := qualifiedID(f.srcNS, srcLabel)
+		dstID := qualifiedID(f.dstNS, dstLabel)
+
+		if _, ok := nodeMap[srcID]; !ok {
+			nodeMap[srcID] = &Node{ID: srcID, Label: srcLabel, Namespace: f.srcNS}
+		}
+		if _, ok := nodeMap[dstID]; !ok {
+			nodeMap[dstID] = &Node{ID: dstID, Label: dstLabel, Namespace: f.dstNS}
+		}
+		nodeMap[dstID].Traffic++
+		nodeTraffic[srcID]++
+		nodeTraffic[dstID]++
+
+		key := edgeKey{srcID, dstID}
 		e, ok := edgeMap[key]
 		if !ok {
 			e = &struct {
@@ -202,6 +257,37 @@ func (a *Aggregator) Snapshot(namespace string) Graph {
 			e.forwarded++
 		}
 		e.protocol[f.protocol]++
+	}
+
+	graph := Graph{
+		ViewMode: viewMode,
+	}
+
+	if viewMode == ViewModePod && options.PodMaxNodes > 0 && len(nodeMap) > options.PodMaxNodes {
+		allowed := topNodeIDsByTraffic(nodeMap, nodeTraffic, options.PodMaxNodes)
+		totalNodes := len(nodeMap)
+
+		for id := range nodeMap {
+			if _, ok := allowed[id]; !ok {
+				delete(nodeMap, id)
+			}
+		}
+		for key := range edgeMap {
+			if _, ok := allowed[key.src]; !ok {
+				delete(edgeMap, key)
+				continue
+			}
+			if _, ok := allowed[key.dst]; !ok {
+				delete(edgeMap, key)
+			}
+		}
+
+		graph.Truncation = &Truncation{
+			Reason:     "top_pods_by_traffic",
+			Limit:      options.PodMaxNodes,
+			TotalNodes: totalNodes,
+			ShownNodes: len(nodeMap),
+		}
 	}
 
 	nodes := make([]Node, 0, len(nodeMap))
@@ -239,7 +325,9 @@ func (a *Aggregator) Snapshot(namespace string) Graph {
 		})
 	}
 
-	return Graph{Nodes: nodes, Links: links}
+	graph.Nodes = nodes
+	graph.Links = links
+	return graph
 }
 
 func cloneProtocolCounts(protocols map[string]int) map[string]int {
@@ -258,6 +346,53 @@ func cloneProtocolCounts(protocols map[string]int) map[string]int {
 	return copied
 }
 
+func labelsForView(f flowRecord, viewMode ViewMode) (string, string) {
+	if viewMode == ViewModePod {
+		return podLabelOrFallback(f.srcPod, f.srcService), podLabelOrFallback(f.dstPod, f.dstService)
+	}
+	return f.srcService, f.dstService
+}
+
+func podLabelOrFallback(pod, fallback string) string {
+	if pod != "" {
+		return pod
+	}
+	return fallback
+}
+
+func qualifiedID(namespace, label string) string {
+	if namespace == "" {
+		return label
+	}
+	return namespace + "/" + label
+}
+
+func topNodeIDsByTraffic(nodes map[string]*Node, traffic map[string]int, limit int) map[string]struct{} {
+	type nodeRank struct {
+		id      string
+		traffic int
+	}
+	ranked := make([]nodeRank, 0, len(nodes))
+	for id := range nodes {
+		ranked = append(ranked, nodeRank{
+			id:      id,
+			traffic: traffic[id],
+		})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].traffic == ranked[j].traffic {
+			return ranked[i].id < ranked[j].id
+		}
+		return ranked[i].traffic > ranked[j].traffic
+	})
+
+	kept := make(map[string]struct{}, limit)
+	for i := 0; i < len(ranked) && i < limit; i++ {
+		kept[ranked[i].id] = struct{}{}
+	}
+	return kept
+}
+
 // serviceLabel extracts a human-readable service name from a Hubble endpoint.
 func serviceLabel(ep *flowpb.Endpoint) string {
 	for _, lbl := range ep.GetLabels() {
@@ -270,6 +405,16 @@ func serviceLabel(ep *flowpb.Endpoint) string {
 			return lbl[8:]
 		}
 	}
+	if name := ep.GetPodName(); name != "" {
+		return name
+	}
+	if ep.GetIdentity() == 1 {
+		return "world"
+	}
+	return ""
+}
+
+func podLabel(ep *flowpb.Endpoint) string {
 	if name := ep.GetPodName(); name != "" {
 		return name
 	}

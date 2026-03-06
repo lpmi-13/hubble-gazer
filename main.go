@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ func main() {
 	tlsCert := os.Getenv("TLS_CERT_FILE")
 	tlsKey := os.Getenv("TLS_KEY_FILE")
 	hubbleTLS := os.Getenv("HUBBLE_RELAY_TLS") == "true"
+	podViewMaxNodes := envOrPositiveInt("POD_VIEW_MAX_NODES", 500)
 
 	aggregator := graph.NewAggregator(30 * time.Second)
 
@@ -68,6 +70,15 @@ func main() {
 			http.Error(w, "invalid namespace", http.StatusBadRequest)
 			return
 		}
+		rawViewMode := r.URL.Query().Get("view")
+		if rawViewMode == "" {
+			rawViewMode = string(graph.ViewModeService)
+		}
+		viewMode, ok := graph.ParseViewMode(rawViewMode)
+		if !ok {
+			http.Error(w, "invalid view mode", http.StatusBadRequest)
+			return
+		}
 
 		if activeSSE.Add(1) > maxSSEConnections {
 			activeSSE.Add(-1)
@@ -89,14 +100,22 @@ func main() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
-		sendGraph(w, flusher, aggregator, namespace)
+		sendGraph(w, flusher, aggregator, graph.SnapshotOptions{
+			Namespace:   namespace,
+			ViewMode:    viewMode,
+			PodMaxNodes: podViewMaxNodes,
+		})
 
 		for {
 			select {
 			case <-r.Context().Done():
 				return
 			case <-ticker.C:
-				sendGraph(w, flusher, aggregator, namespace)
+				sendGraph(w, flusher, aggregator, graph.SnapshotOptions{
+					Namespace:   namespace,
+					ViewMode:    viewMode,
+					PodMaxNodes: podViewMaxNodes,
+				})
 			}
 		}
 	})
@@ -127,8 +146,8 @@ func main() {
 	}
 }
 
-func sendGraph(w http.ResponseWriter, flusher http.Flusher, agg *graph.Aggregator, namespace string) {
-	g := agg.Snapshot(namespace)
+func sendGraph(w http.ResponseWriter, flusher http.Flusher, agg *graph.Aggregator, options graph.SnapshotOptions) {
+	g := agg.SnapshotWithOptions(options)
 	data, err := json.Marshal(g)
 	if err != nil {
 		log.Printf("failed to marshal graph: %v", err)
@@ -146,6 +165,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envOrPositiveInt(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		log.Printf("invalid %s=%q; using fallback %d", key, value, fallback)
+		return fallback
+	}
+	return parsed
 }
 
 // --- Middleware ---
