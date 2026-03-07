@@ -9,6 +9,7 @@ const {
   resolveDraggedNodeOverlap,
   mergeGraphUpdate,
   applyGroupedLayoutInPlace,
+  applyNodeGroupedLayoutInPlace,
 } = __TEST_ONLY__;
 
 test('setNodeFixedPosition pins node and clears velocity', () => {
@@ -44,7 +45,7 @@ test('mergeGraphUpdate preserves existing node position and pins it', () => {
 
   const prev = { nodes: [existing], links: [] };
   const incoming = {
-    nodes: [{ id: 'demo/productpage', label: 'productpage', namespace: 'demo', traffic: 11 }],
+    nodes: [{ id: 'demo/productpage', label: 'productpage', namespace: 'demo', k8sNode: 'worker-a', traffic: 11 }],
     links: [],
   };
 
@@ -59,6 +60,38 @@ test('mergeGraphUpdate preserves existing node position and pins it', () => {
   assert.equal(existing.vx, 0);
   assert.equal(existing.vy, 0);
   assert.equal(existing.traffic, 11);
+  assert.equal(existing.k8sNode, 'worker-a');
+});
+
+test('mergeGraphUpdate keeps in-memory position when a stored pinned fallback exists', () => {
+  const existing = {
+    id: 'demo/details',
+    label: 'details',
+    namespace: 'demo',
+    traffic: 5,
+    x: 96,
+    y: -42,
+    fx: 96,
+    fy: -42,
+    vx: 0,
+    vy: 0,
+  };
+
+  const prev = { nodes: [existing], links: [] };
+  const incoming = {
+    nodes: [{ id: existing.id, label: existing.label, namespace: existing.namespace, traffic: 9 }],
+    links: [],
+  };
+  const pinnedFallbacks = new Map([[existing.id, { x: 0, y: 0 }]]);
+
+  const next = mergeGraphUpdate(prev, incoming, pinnedFallbacks, new Set());
+
+  assert.equal(next.nodes.length, 1);
+  assert.equal(next.nodes[0], existing);
+  assert.equal(existing.x, 96);
+  assert.equal(existing.y, -42);
+  assert.equal(existing.layoutTargetX, 96);
+  assert.equal(existing.layoutTargetY, -42);
 });
 
 test('mergeGraphUpdate updates live link metrics in place', () => {
@@ -217,4 +250,110 @@ test('applyGroupedLayoutInPlace preserves node object identity for link referenc
   assert.equal(targetNode.fy, targetNode.y);
   assert.equal(targetNode.vx, 0);
   assert.equal(targetNode.vy, 0);
+});
+
+test('applyNodeGroupedLayoutInPlace clusters pods by Kubernetes node', () => {
+  const nodes = [
+    { id: 'demo/reviews-0', label: 'reviews-0', namespace: 'demo', k8sNode: 'worker-a', traffic: 2 },
+    { id: 'demo/reviews-1', label: 'reviews-1', namespace: 'demo', k8sNode: 'worker-a', traffic: 2 },
+    { id: 'demo/api-0', label: 'api-0', namespace: 'demo', k8sNode: 'worker-b', traffic: 2 },
+    { id: 'demo/api-1', label: 'api-1', namespace: 'demo', k8sNode: 'worker-b', traffic: 2 },
+  ];
+
+  const boxes = applyNodeGroupedLayoutInPlace(nodes);
+  assert.equal(Array.isArray(boxes), true);
+  assert.equal(boxes.length, 2);
+
+  const workerA = nodes.filter((node) => node.k8sNode === 'worker-a');
+  const workerB = nodes.filter((node) => node.k8sNode === 'worker-b');
+
+  const centerA = {
+    x: (workerA[0].x + workerA[1].x) / 2,
+    y: (workerA[0].y + workerA[1].y) / 2,
+  };
+  const centerB = {
+    x: (workerB[0].x + workerB[1].x) / 2,
+    y: (workerB[0].y + workerB[1].y) / 2,
+  };
+
+  const betweenCenters = Math.hypot(centerA.x - centerB.x, centerA.y - centerB.y);
+  assert.ok(betweenCenters >= 200);
+
+  const boxesByKey = new Map(boxes.map((box) => [box.key, box]));
+
+  for (const node of nodes) {
+    const box = boxesByKey.get(node.k8sNode);
+    assert.ok(box);
+    assert.ok(node.x >= box.innerMinX - 0.01 && node.x <= box.innerMaxX + 0.01);
+    assert.ok(node.y >= box.innerMinY - 0.01 && node.y <= box.innerMaxY + 0.01);
+    assert.equal(node.fx, node.x);
+    assert.equal(node.fy, node.y);
+    assert.equal(node.vx, 0);
+    assert.equal(node.vy, 0);
+  }
+});
+
+test('applyNodeGroupedLayoutInPlace keeps worker node boxes on a circle', () => {
+  const nodes = [
+    { id: 'demo/a-0', label: 'a-0', namespace: 'demo', k8sNode: 'worker-a', traffic: 1 },
+    { id: 'demo/b-0', label: 'b-0', namespace: 'demo', k8sNode: 'worker-b', traffic: 1 },
+    { id: 'demo/c-0', label: 'c-0', namespace: 'demo', k8sNode: 'worker-c', traffic: 1 },
+    { id: 'demo/d-0', label: 'd-0', namespace: 'demo', k8sNode: 'worker-d', traffic: 1 },
+  ];
+
+  const boxes = applyNodeGroupedLayoutInPlace(nodes);
+  assert.equal(boxes.length, 4);
+
+  const radii = boxes.map((box) => Math.hypot(box.centerX, box.centerY));
+  const minRadius = Math.min(...radii);
+  const maxRadius = Math.max(...radii);
+  assert.ok(maxRadius - minRadius < 0.01);
+});
+
+test('applyNodeGroupedLayoutInPlace preserves positioned nodes and updates layout targets', () => {
+  const nodes = [
+    {
+      id: 'demo/reviews-0',
+      label: 'reviews-0',
+      namespace: 'demo',
+      k8sNode: 'worker-a',
+      traffic: 2,
+      x: 540,
+      y: -320,
+      fx: 540,
+      fy: -320,
+      vx: 0,
+      vy: 0,
+    },
+    {
+      id: 'demo/api-0',
+      label: 'api-0',
+      namespace: 'demo',
+      k8sNode: 'worker-b',
+      traffic: 2,
+      x: -520,
+      y: 300,
+      fx: -520,
+      fy: 300,
+      vx: 0,
+      vy: 0,
+    },
+  ];
+
+  const before = nodes.map((node) => ({ id: node.id, x: node.x, y: node.y }));
+  const boxes = applyNodeGroupedLayoutInPlace(nodes);
+  const boxesByKey = new Map(boxes.map((box) => [box.key, box]));
+
+  for (const node of nodes) {
+    const initial = before.find((entry) => entry.id === node.id);
+    assert.equal(node.x, initial.x);
+    assert.equal(node.y, initial.y);
+    assert.equal(node.fx, initial.x);
+    assert.equal(node.fy, initial.y);
+
+    const box = boxesByKey.get(node.k8sNode);
+    assert.ok(box);
+    assert.ok(node.layoutTargetX >= box.innerMinX - 0.01 && node.layoutTargetX <= box.innerMaxX + 0.01);
+    assert.ok(node.layoutTargetY >= box.innerMinY - 0.01 && node.layoutTargetY <= box.innerMaxY + 0.01);
+  }
 });

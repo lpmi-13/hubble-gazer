@@ -29,6 +29,11 @@ const LAYOUT_EASING = 0.32;
 const LAYOUT_MAX_STEP = 20;
 const LAYOUT_MIN_STEP = 0.35;
 const LAYOUT_SNAP_EPSILON = 0.25;
+const NODE_GROUP_MODE = 'k8sNode';
+const NODE_GROUP_STROKE = 'rgba(110, 194, 242, 0.36)';
+const NODE_GROUP_FILL = 'rgba(28, 77, 110, 0.14)';
+const NODE_GROUP_LABEL_BG = 'rgba(22, 62, 90, 0.74)';
+const NODE_GROUP_LABEL_TEXT = '#cdeeff';
 
 function isCoarsePointer() {
   return typeof window !== 'undefined'
@@ -42,6 +47,37 @@ function getNodeRadius() {
 
 function getNodeColor(node) {
   return NAMESPACE_COLORS[node.namespace] || DEFAULT_COLOR;
+}
+
+function nodeGroupKey(node) {
+  const value = typeof node?.k8sNode === 'string' ? node.k8sNode.trim() : '';
+  return value.length > 0 ? value : 'unknown';
+}
+
+function clampToGroupBox(node, x, y, boxesByKey) {
+  const box = boxesByKey.get(nodeGroupKey(node));
+  if (!box || !Number.isFinite(x) || !Number.isFinite(y)) {
+    return { x, y };
+  }
+  return {
+    x: Math.min(box.innerMaxX, Math.max(box.innerMinX, x)),
+    y: Math.min(box.innerMaxY, Math.max(box.innerMinY, y)),
+  };
+}
+
+function roundedRectPath(ctx, x, y, width, height, radius) {
+  const r = Math.max(0, Math.min(radius, Math.min(width, height) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.arcTo(x + width, y, x + width, y + r, r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.arcTo(x + width, y + height, x + width - r, y + height, r);
+  ctx.lineTo(x + r, y + height);
+  ctx.arcTo(x, y + height, x, y + height - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
 }
 
 function getLinkEndpoints(link) {
@@ -136,11 +172,20 @@ function drawParticlesOnCurve(ctx, start, control, end, link, nowMs) {
   ctx.globalAlpha = 1;
 }
 
-export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePositionChange }) {
+export default function NetworkGraph({
+  data,
+  groupingMode = '',
+  nodeGroupBoxes = [],
+  onLinkClick,
+  onNodeDrag,
+  onNodePositionChange,
+}) {
   const graphRef = useRef();
   const containerRef = useRef();
   const graphNodesRef = useRef([]);
   const draggingNodeIdRef = useRef(null);
+  const groupingModeRef = useRef(groupingMode);
+  const groupBoxesByKeyRef = useRef(new Map());
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [hasReceivedData, setHasReceivedData] = useState(false);
@@ -156,11 +201,28 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
   }, [data.nodes]);
 
   useEffect(() => {
+    groupingModeRef.current = groupingMode;
+  }, [groupingMode]);
+
+  useEffect(() => {
+    const byKey = new Map();
+    for (const box of nodeGroupBoxes || []) {
+      if (!box || typeof box.key !== 'string') {
+        continue;
+      }
+      byKey.set(box.key, box);
+    }
+    groupBoxesByKeyRef.current = byKey;
+  }, [nodeGroupBoxes]);
+
+  useEffect(() => {
     let rafId = 0;
 
     const tick = () => {
       const nodes = graphNodesRef.current;
       const draggedId = draggingNodeIdRef.current;
+      const isNodeGrouped = groupingModeRef.current === NODE_GROUP_MODE;
+      const groupBoxesByKey = groupBoxesByKeyRef.current;
       let moved = false;
 
       for (const node of nodes) {
@@ -168,17 +230,25 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
           continue;
         }
 
-        const targetX = Number(node.layoutTargetX);
-        const targetY = Number(node.layoutTargetY);
+        let targetX = Number(node.layoutTargetX);
+        let targetY = Number(node.layoutTargetY);
         if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
           continue;
         }
+        if (isNodeGrouped) {
+          const clampedTarget = clampToGroupBox(node, targetX, targetY, groupBoxesByKey);
+          targetX = clampedTarget.x;
+          targetY = clampedTarget.y;
+        }
 
         if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) {
-          node.x = targetX;
-          node.y = targetY;
-          node.fx = targetX;
-          node.fy = targetY;
+          const clamped = isNodeGrouped
+            ? clampToGroupBox(node, targetX, targetY, groupBoxesByKey)
+            : { x: targetX, y: targetY };
+          node.x = clamped.x;
+          node.y = clamped.y;
+          node.fx = clamped.x;
+          node.fy = clamped.y;
           node.vx = 0;
           node.vy = 0;
           moved = true;
@@ -190,10 +260,13 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
         const distance = Math.hypot(dx, dy);
         if (distance <= LAYOUT_SNAP_EPSILON) {
           if (distance > 0) {
-            node.x = targetX;
-            node.y = targetY;
-            node.fx = targetX;
-            node.fy = targetY;
+            const clamped = isNodeGrouped
+              ? clampToGroupBox(node, targetX, targetY, groupBoxesByKey)
+              : { x: targetX, y: targetY };
+            node.x = clamped.x;
+            node.y = clamped.y;
+            node.fx = clamped.x;
+            node.fy = clamped.y;
             node.vx = 0;
             node.vy = 0;
             moved = true;
@@ -203,8 +276,10 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
 
         const step = Math.min(LAYOUT_MAX_STEP, Math.max(LAYOUT_MIN_STEP, distance * LAYOUT_EASING));
         const ratio = step / distance;
-        node.x += dx * ratio;
-        node.y += dy * ratio;
+        const nextX = node.x + (dx * ratio);
+        const nextY = node.y + (dy * ratio);
+        node.x = nextX;
+        node.y = nextY;
         node.fx = node.x;
         node.fy = node.y;
         node.vx = 0;
@@ -316,8 +391,15 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
     }
     setIsDragging(true);
     draggingNodeIdRef.current = node.id;
+    if (groupingModeRef.current === NODE_GROUP_MODE) {
+      const clamped = clampToGroupBox(node, node.x, node.y, groupBoxesByKeyRef.current);
+      node.x = clamped.x;
+      node.y = clamped.y;
+    }
     node.layoutTargetX = node.x;
     node.layoutTargetY = node.y;
+    node.fx = node.x;
+    node.fy = node.y;
     if (onNodeDrag) {
       onNodeDrag(node.id, node.x, node.y);
     }
@@ -330,6 +412,11 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
       return;
     }
     draggingNodeIdRef.current = null;
+    if (groupingModeRef.current === NODE_GROUP_MODE) {
+      const clamped = clampToGroupBox(node, node.x, node.y, groupBoxesByKeyRef.current);
+      node.x = clamped.x;
+      node.y = clamped.y;
+    }
     node.fx = node.x;
     node.fy = node.y;
     node.layoutTargetX = node.x;
@@ -338,6 +425,69 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
       onNodePositionChange(node.id, node.x, node.y);
     }
   }, [onNodePositionChange]);
+
+  const renderFramePre = useCallback((ctx, globalScale) => {
+    if (groupingMode !== NODE_GROUP_MODE || !Array.isArray(nodeGroupBoxes) || nodeGroupBoxes.length === 0) {
+      return;
+    }
+
+    const strokeWidth = 1.3 / Math.max(globalScale, 0.001);
+    const labelFontSize = Math.max(9 / Math.max(globalScale, 0.001), 5);
+
+    ctx.save();
+    ctx.lineWidth = strokeWidth;
+    ctx.setLineDash([10 / Math.max(globalScale, 0.001), 7 / Math.max(globalScale, 0.001)]);
+
+    for (const box of nodeGroupBoxes) {
+      if (!box) {
+        continue;
+      }
+      const width = box.maxX - box.minX;
+      const height = box.maxY - box.minY;
+      const radius = 14 / Math.max(globalScale, 0.001);
+
+      roundedRectPath(ctx, box.minX, box.minY, width, height, radius);
+      ctx.fillStyle = NODE_GROUP_FILL;
+      ctx.fill();
+      ctx.strokeStyle = NODE_GROUP_STROKE;
+      ctx.stroke();
+
+      const label = typeof box.label === 'string' ? box.label : box.key;
+      if (label) {
+        ctx.font = `${labelFontSize}px "IBM Plex Sans", "Space Grotesk", sans-serif`;
+        const textWidth = ctx.measureText(label).width;
+        const labelPadX = 8 / Math.max(globalScale, 0.001);
+        const labelPadY = 5 / Math.max(globalScale, 0.001);
+        const labelHeight = labelFontSize + (labelPadY * 2);
+        const labelWidth = textWidth + (labelPadX * 2);
+        const labelX = box.minX + (10 / Math.max(globalScale, 0.001));
+        const labelY = box.minY + (10 / Math.max(globalScale, 0.001));
+
+        roundedRectPath(
+          ctx,
+          labelX,
+          labelY,
+          labelWidth,
+          labelHeight,
+          8 / Math.max(globalScale, 0.001),
+        );
+        ctx.setLineDash([]);
+        ctx.fillStyle = NODE_GROUP_LABEL_BG;
+        ctx.fill();
+        ctx.strokeStyle = NODE_GROUP_STROKE;
+        ctx.stroke();
+        ctx.setLineDash([10 / Math.max(globalScale, 0.001), 7 / Math.max(globalScale, 0.001)]);
+
+        ctx.fillStyle = NODE_GROUP_LABEL_TEXT;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, labelX + labelPadX, labelY + (labelHeight / 2));
+      }
+    }
+
+    ctx.setLineDash([]);
+    ctx.restore();
+  }, [groupingMode, nodeGroupBoxes]);
 
   const linkCanvasObject = useCallback((link, ctx) => {
     const endpoints = getLinkEndpoints(link);
@@ -404,6 +554,7 @@ export default function NetworkGraph({ data, onLinkClick, onNodeDrag, onNodePosi
           nodePointerAreaPaint={nodePointerAreaPaint}
           linkCanvasObject={linkCanvasObject}
           linkCanvasObjectMode={() => 'replace'}
+          onRenderFramePre={renderFramePre}
           linkWidth={edgeWidth}
           linkCurvature={EDGE_CURVATURE}
           autoPauseRedraw={false}

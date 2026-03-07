@@ -37,6 +37,7 @@ type Node struct {
 	ID        string `json:"id"`
 	Label     string `json:"label"`
 	Namespace string `json:"namespace"`
+	K8sNode   string `json:"k8sNode,omitempty"`
 	Traffic   int    `json:"traffic"` // total incoming flow count
 }
 
@@ -75,6 +76,8 @@ type flowRecord struct {
 	dstService string
 	srcPod     string
 	dstPod     string
+	nodeName   string
+	direction  flowpb.TrafficDirection
 	verdict    flowpb.Verdict
 	protocol   string
 }
@@ -135,6 +138,8 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 		dstService: dstService,
 		srcPod:     srcPod,
 		dstPod:     dstPod,
+		nodeName:   flow.GetNodeName(),
+		direction:  flow.GetTrafficDirection(),
 		verdict:    flow.GetVerdict(),
 		protocol:   proto,
 	}
@@ -216,6 +221,7 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 	// Build nodes and links
 	nodeMap := make(map[string]*Node)
 	nodeTraffic := make(map[string]int)
+	podNodeVotes := make(map[string]map[string]int)
 	type edgeKey struct{ src, dst string }
 	edgeMap := make(map[edgeKey]*struct {
 		count     int
@@ -238,6 +244,19 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 		if _, ok := nodeMap[dstID]; !ok {
 			nodeMap[dstID] = &Node{ID: dstID, Label: dstLabel, Namespace: f.dstNS}
 		}
+
+		if viewMode == ViewModePod {
+			assignPodNodeVote(
+				podNodeVotes,
+				f.nodeName,
+				f.direction,
+				srcID,
+				dstID,
+				srcLabel,
+				dstLabel,
+			)
+		}
+
 		nodeMap[dstID].Traffic++
 		nodeTraffic[srcID]++
 		nodeTraffic[dstID]++
@@ -292,6 +311,9 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 
 	nodes := make([]Node, 0, len(nodeMap))
 	for _, n := range nodeMap {
+		if viewMode == ViewModePod {
+			n.K8sNode = dominantNodeName(podNodeVotes[n.ID])
+		}
 		nodes = append(nodes, *n)
 	}
 
@@ -358,6 +380,59 @@ func podLabelOrFallback(pod, fallback string) string {
 		return pod
 	}
 	return fallback
+}
+
+func assignPodNodeVote(votes map[string]map[string]int, observerNode string, direction flowpb.TrafficDirection, srcID, dstID, srcLabel, dstLabel string) {
+	if observerNode == "" {
+		return
+	}
+
+	switch direction {
+	case flowpb.TrafficDirection_EGRESS:
+		if srcLabel != "world" {
+			addPodNodeVote(votes, srcID, observerNode)
+		}
+	case flowpb.TrafficDirection_INGRESS:
+		if dstLabel != "world" {
+			addPodNodeVote(votes, dstID, observerNode)
+		}
+	default:
+		// Unknown direction: keep a best-effort mapping by crediting both endpoints.
+		if srcLabel != "world" {
+			addPodNodeVote(votes, srcID, observerNode)
+		}
+		if dstLabel != "world" {
+			addPodNodeVote(votes, dstID, observerNode)
+		}
+	}
+}
+
+func addPodNodeVote(votes map[string]map[string]int, podID, nodeName string) {
+	if podID == "" || nodeName == "" {
+		return
+	}
+	byNode, ok := votes[podID]
+	if !ok {
+		byNode = make(map[string]int)
+		votes[podID] = byNode
+	}
+	byNode[nodeName]++
+}
+
+func dominantNodeName(votes map[string]int) string {
+	if len(votes) == 0 {
+		return ""
+	}
+
+	bestNode := ""
+	bestCount := -1
+	for node, count := range votes {
+		if count > bestCount || (count == bestCount && (bestNode == "" || node < bestNode)) {
+			bestNode = node
+			bestCount = count
+		}
+	}
+	return bestNode
 }
 
 func qualifiedID(namespace, label string) string {

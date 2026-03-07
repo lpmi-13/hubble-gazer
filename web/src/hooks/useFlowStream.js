@@ -5,6 +5,11 @@ const VIEW_MODES = Object.freeze({
   pod: 'pod',
 });
 
+const LAYOUT_MODES = Object.freeze({
+  default: 'default',
+  k8sNode: 'k8sNode',
+});
+
 const MODES = [VIEW_MODES.service, VIEW_MODES.pod];
 
 const NAMESPACE_CENTERS = {
@@ -24,6 +29,15 @@ const LAYOUT_PUSH_START = 1.05;
 const LAYOUT_PUSH_DECAY_POWER = 1.7;
 const LAYOUT_PUSH_EPSILON = 0.001;
 const LAYOUT_PUSH_MULTIPLIER = 2;
+const NODE_GROUP_CIRCLE_MIN_RADIUS = 220;
+const NODE_GROUP_CIRCLE_CHORD_SPACING = 360;
+const NODE_GROUP_CIRCLE_START_ANGLE = -Math.PI / 2;
+const NODE_GROUP_SLOT_CAPACITY = 12;
+const NODE_GROUP_BASE_RADIUS = 26;
+const NODE_GROUP_RING_STEP = 18;
+const NODE_GROUP_BOX_PADDING = 52;
+const NODE_GROUP_BOX_MIN_HALF_SIZE = 132;
+const NODE_GROUP_INNER_PADDING = NODE_RADIUS + 10;
 
 function hashString(input) {
   let hash = 0;
@@ -75,6 +89,135 @@ function groupedPositionForNode(node) {
   };
 }
 
+function nodeGroupKeyForNode(node) {
+  const value = typeof node?.k8sNode === 'string' ? node.k8sNode.trim() : '';
+  return value.length > 0 ? value : 'unknown';
+}
+
+function nodeGroupCenters(keys) {
+  const centers = new Map();
+  if (!Array.isArray(keys) || keys.length === 0) {
+    return centers;
+  }
+
+  if (keys.length === 1) {
+    centers.set(keys[0], { x: 0, y: 0 });
+    return centers;
+  }
+
+  const count = keys.length;
+  const denominator = 2 * Math.sin(Math.PI / count);
+  const requiredRadius = denominator > 0
+    ? NODE_GROUP_CIRCLE_CHORD_SPACING / denominator
+    : NODE_GROUP_CIRCLE_MIN_RADIUS;
+  const radius = Math.max(NODE_GROUP_CIRCLE_MIN_RADIUS, requiredRadius);
+
+  keys.forEach((key, index) => {
+    const angle = NODE_GROUP_CIRCLE_START_ANGLE + ((index / count) * Math.PI * 2);
+    centers.set(key, {
+      x: Math.cos(angle) * radius,
+      y: Math.sin(angle) * radius,
+    });
+  });
+  return centers;
+}
+
+function buildNodeGroupLayoutPlan(nodes) {
+  const groups = new Map();
+  for (const node of nodes) {
+    if (!node || typeof node.id !== 'string') {
+      continue;
+    }
+    const key = nodeGroupKeyForNode(node);
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(node);
+  }
+
+  const orderedKeys = [...groups.keys()].sort((a, b) => a.localeCompare(b));
+  const centers = nodeGroupCenters(orderedKeys);
+  const boxes = [];
+  const targetsByID = new Map();
+
+  for (const key of orderedKeys) {
+    const cluster = groups.get(key);
+    if (!Array.isArray(cluster) || cluster.length === 0) {
+      continue;
+    }
+
+    cluster.sort((a, b) => {
+      const aID = typeof a.id === 'string' ? a.id : '';
+      const bID = typeof b.id === 'string' ? b.id : '';
+      return aID.localeCompare(bID);
+    });
+
+    const center = centers.get(key) || { x: 0, y: 0 };
+    const rotation = (hashString(`node-group:${key}`) % 360) * (Math.PI / 180);
+    const maxRing = Math.floor(Math.max(0, cluster.length - 1) / NODE_GROUP_SLOT_CAPACITY);
+    const maxRadius = NODE_GROUP_BASE_RADIUS + (maxRing * NODE_GROUP_RING_STEP);
+    const halfSize = Math.max(NODE_GROUP_BOX_MIN_HALF_SIZE, maxRadius + NODE_GROUP_BOX_PADDING);
+    const box = {
+      key,
+      label: key === 'unknown' ? 'Unknown Node' : key,
+      centerX: center.x,
+      centerY: center.y,
+      minX: center.x - halfSize,
+      maxX: center.x + halfSize,
+      minY: center.y - halfSize,
+      maxY: center.y + halfSize,
+      innerMinX: (center.x - halfSize) + NODE_GROUP_INNER_PADDING,
+      innerMaxX: (center.x + halfSize) - NODE_GROUP_INNER_PADDING,
+      innerMinY: (center.y - halfSize) + NODE_GROUP_INNER_PADDING,
+      innerMaxY: (center.y + halfSize) - NODE_GROUP_INNER_PADDING,
+    };
+    boxes.push(box);
+
+    for (let i = 0; i < cluster.length; i++) {
+      const node = cluster[i];
+      const ring = Math.floor(i / NODE_GROUP_SLOT_CAPACITY);
+      const slot = i % NODE_GROUP_SLOT_CAPACITY;
+      const angle = rotation + ((slot / NODE_GROUP_SLOT_CAPACITY) * (Math.PI * 2));
+      const radius = NODE_GROUP_BASE_RADIUS + (ring * NODE_GROUP_RING_STEP);
+      targetsByID.set(node.id, {
+        x: center.x + (Math.cos(angle) * radius),
+        y: center.y + (Math.sin(angle) * radius),
+        key,
+      });
+    }
+  }
+
+  return { boxes, targetsByID };
+}
+
+function nodeGroupBoxMap(boxes) {
+  const byKey = new Map();
+  for (const box of boxes || []) {
+    if (!box || typeof box.key !== 'string') {
+      continue;
+    }
+    byKey.set(box.key, box);
+  }
+  return byKey;
+}
+
+function clampPointToGroupBox(boxesByKey, node, x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return { x, y };
+  }
+
+  const key = nodeGroupKeyForNode(node);
+  const box = boxesByKey.get(key);
+  if (!box) {
+    return { x, y };
+  }
+
+  return {
+    x: Math.min(box.innerMaxX, Math.max(box.innerMinX, x)),
+    y: Math.min(box.innerMaxY, Math.max(box.innerMinY, y)),
+  };
+}
+
 function nodeRadius(node) {
   return NODE_RADIUS;
 }
@@ -121,6 +264,8 @@ function createInitialModeState() {
     graphData: createEmptyGraph(),
     connected: false,
     truncation: null,
+    layoutMode: LAYOUT_MODES.default,
+    nodeGroupBoxes: [],
   };
 }
 
@@ -358,9 +503,51 @@ function applyGroupedLayoutInPlace(nodes) {
   return nodes;
 }
 
+function applyNodeGroupedLayoutInPlace(nodes) {
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+
+  const plan = buildNodeGroupLayoutPlan(nodes);
+  const boxesByKey = nodeGroupBoxMap(plan.boxes);
+  const targetNodes = [];
+  for (const [id, target] of plan.targetsByID.entries()) {
+    targetNodes.push({ id, x: target.x, y: target.y });
+  }
+  resolveLayoutOverlapsInPlace(targetNodes);
+  const targetById = new Map();
+  for (const target of targetNodes) {
+    targetById.set(target.id, target);
+  }
+
+  for (const node of nodes) {
+    if (!node || typeof node.id !== 'string') {
+      continue;
+    }
+    const target = targetById.get(node.id);
+    if (!target) {
+      continue;
+    }
+    const clampedTarget = clampPointToGroupBox(boxesByKey, node, target.x, target.y);
+    node.layoutTargetX = clampedTarget.x;
+    node.layoutTargetY = clampedTarget.y;
+
+    if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+      setNodeFixedPosition(node, clampedTarget.x, clampedTarget.y);
+      continue;
+    }
+    node.fx = node.x;
+    node.fy = node.y;
+    node.vx = 0;
+    node.vy = 0;
+  }
+  return plan.boxes;
+}
+
 function updateExistingNode(existingNode, nodePatch, pinnedPosition, isDragging) {
   existingNode.label = nodePatch.label;
   existingNode.namespace = nodePatch.namespace;
+  existingNode.k8sNode = nodePatch.k8sNode;
   existingNode.traffic = nodePatch.traffic;
 
   if (isDragging && Number.isFinite(existingNode.x) && Number.isFinite(existingNode.y)) {
@@ -368,13 +555,14 @@ function updateExistingNode(existingNode, nodePatch, pinnedPosition, isDragging)
     return;
   }
 
-  if (pinnedPosition) {
-    setNodeFixedPosition(existingNode, pinnedPosition.x, pinnedPosition.y);
+  // Preserve current in-memory coordinates to avoid snapping when overlap animation is in progress.
+  if (Number.isFinite(existingNode.x) && Number.isFinite(existingNode.y)) {
+    setNodeFixedPosition(existingNode, existingNode.x, existingNode.y);
     return;
   }
 
-  if (Number.isFinite(existingNode.x) && Number.isFinite(existingNode.y)) {
-    setNodeFixedPosition(existingNode, existingNode.x, existingNode.y);
+  if (pinnedPosition) {
+    setNodeFixedPosition(existingNode, pinnedPosition.x, pinnedPosition.y);
     return;
   }
 
@@ -575,7 +763,19 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
 
       const node = graphData.nodes[idx];
       setNodeFixedPosition(node, x, y);
-      const resolved = resolveDraggedNodeOverlap(graphData.nodes, nodeId) || { x: node.x, y: node.y };
+      const virtualNodes = graphData.nodes.map((candidate) => ({
+        id: candidate?.id,
+        traffic: candidate?.traffic,
+        x: candidate?.id === nodeId ? x : candidate?.x,
+        y: candidate?.id === nodeId ? y : candidate?.y,
+      }));
+      let resolved = resolveDraggedNodeOverlap(virtualNodes, nodeId) || { x, y };
+      if (currentModeState.layoutMode === LAYOUT_MODES.k8sNode) {
+        const boxesByKey = nodeGroupBoxMap(currentModeState.nodeGroupBoxes);
+        resolved = clampPointToGroupBox(boxesByKey, node, resolved.x, resolved.y);
+      }
+      node.layoutTargetX = resolved.x;
+      node.layoutTargetY = resolved.y;
       nodePositionsRef.current[mode].set(nodeId, resolved);
       savePositionsToStorage(mode, nodePositionsRef.current[mode]);
 
@@ -603,7 +803,14 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
       const graphData = currentModeState.graphData;
 
       if (graphData.nodes.length === 0) {
-        return prev;
+        return {
+          ...prev,
+          [mode]: {
+            ...currentModeState,
+            layoutMode: LAYOUT_MODES.default,
+            nodeGroupBoxes: [],
+          },
+        };
       }
 
       applyGroupedLayoutInPlace(graphData.nodes);
@@ -612,6 +819,42 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
         ...prev,
         [mode]: {
           ...currentModeState,
+          layoutMode: LAYOUT_MODES.default,
+          nodeGroupBoxes: [],
+          graphData: {
+            ...graphData,
+            nodes: [...graphData.nodes],
+            links: [...graphData.links],
+          },
+        },
+      };
+    });
+  }, [resolvedActiveMode]);
+
+  const groupByK8sNode = useCallback(() => {
+    const mode = resolvedActiveMode;
+    if (mode !== VIEW_MODES.pod) {
+      return;
+    }
+
+    draggingNodeIdsRef.current[mode].clear();
+    nodePositionsRef.current[mode].clear();
+    clearPositionsFromStorage(mode);
+
+    setModeState((prev) => {
+      const currentModeState = prev[mode];
+      const graphData = currentModeState.graphData;
+      let nodeGroupBoxes = [];
+      if (graphData.nodes.length > 0) {
+        nodeGroupBoxes = applyNodeGroupedLayoutInPlace(graphData.nodes);
+      }
+
+      return {
+        ...prev,
+        [mode]: {
+          ...currentModeState,
+          layoutMode: LAYOUT_MODES.k8sNode,
+          nodeGroupBoxes,
           graphData: {
             ...graphData,
             nodes: [...graphData.nodes],
@@ -664,6 +907,10 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
               nodePositionsRef.current[mode],
               draggingNodeIdsRef.current[mode],
             );
+            let nodeGroupBoxes = currentModeState.nodeGroupBoxes;
+            if (mode === VIEW_MODES.pod && currentModeState.layoutMode === LAYOUT_MODES.k8sNode) {
+              nodeGroupBoxes = applyNodeGroupedLayoutInPlace(graphData.nodes);
+            }
 
             return {
               ...prev,
@@ -671,6 +918,7 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
                 ...currentModeState,
                 graphData,
                 truncation: normalizeTruncation(incoming?.truncation),
+                nodeGroupBoxes,
               },
             };
           });
@@ -701,9 +949,12 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
     graphData: activeModeState.graphData,
     connected: activeModeState.connected,
     truncation: activeModeState.truncation,
+    layoutMode: activeModeState.layoutMode,
+    nodeGroupBoxes: activeModeState.nodeGroupBoxes,
     trackNodePosition,
     persistNodePosition,
     resetLayout,
+    groupByK8sNode,
   };
 }
 
@@ -713,4 +964,5 @@ export const __TEST_ONLY__ = {
   resolveDraggedNodeOverlap,
   mergeGraphUpdate,
   applyGroupedLayoutInPlace,
+  applyNodeGroupedLayoutInPlace,
 };

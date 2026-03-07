@@ -90,3 +90,36 @@ func TestRandomReplicaIndexStaysWithinServiceReplicaCount(t *testing.T) {
 		t.Fatalf("expected multiple replica indices to appear, got %v", seen)
 	}
 }
+
+func TestBuildReplicaNodeAssignmentsCoversAllReplicaInstances(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	replicaCounts := map[string]int{
+		replicaKey("demo", "frontend"): 2,
+		replicaKey("demo", "api"):      1,
+	}
+
+	assignments := buildReplicaNodeAssignments(rng, replicaCounts)
+	if len(assignments) != 3 {
+		t.Fatalf("expected 3 replica-node assignments, got %d", len(assignments))
+	}
+
+	allowed := make(map[string]struct{}, len(mockNodePool))
+	for _, node := range mockNodePool {
+		allowed[node] = struct{}{}
+	}
+
+	expectedInstances := []string{
+		replicaInstanceKey("demo", "frontend", 0),
+		replicaInstanceKey("demo", "frontend", 1),
+		replicaInstanceKey("demo", "api", 0),
+	}
+	for _, instance := range expectedInstances {
+		node, ok := assignments[instance]
+		if !ok {
+			t.Fatalf("missing assignment for %s", instance)
+		}
+		if _, allowedNode := allowed[node]; !allowedNode {
+			t.Fatalf("unexpected node assignment %q for %s", node, instance)
+		}
+	}
+}

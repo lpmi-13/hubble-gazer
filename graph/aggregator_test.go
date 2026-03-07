@@ -75,6 +75,60 @@ func TestSnapshotWithOptionsPodViewUsesPodIdentity(t *testing.T) {
 	}
 }
 
+func TestSnapshotWithOptionsPodViewIncludesK8sNode(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-b", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-c", flowpb.TrafficDirection_INGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+
+	snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		ViewMode: ViewModePod,
+	})
+
+	byID := make(map[string]Node, len(snapshot.Nodes))
+	for _, node := range snapshot.Nodes {
+		byID[node.ID] = node
+	}
+
+	frontend, ok := byID["demo/frontend-0"]
+	if !ok {
+		t.Fatalf("expected frontend pod node to exist")
+	}
+	if frontend.K8sNode != "node-a" {
+		t.Fatalf("expected frontend pod to map to node-a, got %q", frontend.K8sNode)
+	}
+
+	api, ok := byID["demo/api-0"]
+	if !ok {
+		t.Fatalf("expected api pod node to exist")
+	}
+	if api.K8sNode != "node-c" {
+		t.Fatalf("expected api pod to map to node-c, got %q", api.K8sNode)
+	}
+}
+
 func TestSnapshotWithOptionsPodViewAppliesTopNTruncation(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
 
@@ -135,6 +189,21 @@ func newFlow(srcNS, srcApp, dstNS, dstApp string, verdict flowpb.Verdict, protoc
 }
 
 func newFlowWithPods(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod string, verdict flowpb.Verdict, protocol string) *flowpb.Flow {
+	return newFlowWithPodsOnNode(
+		srcNS,
+		srcApp,
+		srcPod,
+		dstNS,
+		dstApp,
+		dstPod,
+		"",
+		flowpb.TrafficDirection_TRAFFIC_DIRECTION_UNKNOWN,
+		verdict,
+		protocol,
+	)
+}
+
+func newFlowWithPodsOnNode(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod, nodeName string, direction flowpb.TrafficDirection, verdict flowpb.Verdict, protocol string) *flowpb.Flow {
 	return &flowpb.Flow{
 		Source: &flowpb.Endpoint{
 			Namespace: srcNS,
@@ -146,8 +215,10 @@ func newFlowWithPods(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod string, verdic
 			PodName:   dstPod,
 			Labels:    []string{"app=" + dstApp},
 		},
-		Verdict: verdict,
-		L4:      protocolLayer(protocol),
+		NodeName:         nodeName,
+		TrafficDirection: direction,
+		Verdict:          verdict,
+		L4:               protocolLayer(protocol),
 	}
 }
 

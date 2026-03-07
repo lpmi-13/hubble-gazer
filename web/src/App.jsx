@@ -29,13 +29,17 @@ export default function App() {
   const [selectedLinkKey, setSelectedLinkKey] = useState(null);
   const [layoutToastVisible, setLayoutToastVisible] = useState(false);
   const [layoutToastKey, setLayoutToastKey] = useState(0);
+  const [layoutToastMessage, setLayoutToastMessage] = useState('Layout reset');
   const {
     graphData,
     connected,
     truncation,
+    layoutMode,
+    nodeGroupBoxes,
     trackNodePosition,
     persistNodePosition,
     resetLayout,
+    groupByK8sNode,
   } = useFlowStream(namespace, viewMode);
 
   const handleLinkClick = useCallback((link) => {
@@ -64,9 +68,17 @@ export default function App() {
 
   const handleResetLayout = useCallback(() => {
     resetLayout();
+    setLayoutToastMessage('Layout reset');
     setLayoutToastVisible(true);
     setLayoutToastKey((prev) => prev + 1);
   }, [resetLayout]);
+
+  const handleGroupByNode = useCallback(() => {
+    groupByK8sNode();
+    setLayoutToastMessage('Grouped by Kubernetes node');
+    setLayoutToastVisible(true);
+    setLayoutToastKey((prev) => prev + 1);
+  }, [groupByK8sNode]);
 
   useEffect(() => {
     if (!layoutToastVisible) {
@@ -96,8 +108,12 @@ export default function App() {
 
   const canResetLayout = graphData.nodes.length > 0;
   const isPodMode = viewMode === VIEW_MODES.pod;
+  const isNodeGroupMode = isPodMode && layoutMode === 'k8sNode';
+  const canGroupByNode = isPodMode && graphData.nodes.length > 0;
   const graphHint = isPodMode
-    ? 'Pod view is live and can be dense; drag nodes to pin key workloads while telemetry continues streaming.'
+    ? (isNodeGroupMode
+      ? 'Node-group mode active: pods are constrained inside worker-node boundaries.'
+      : 'Pod view is live and can be dense; use Group by Node to cluster pods by Kubernetes worker.')
     : 'Drag nodes to pin placement while telemetry continues streaming.';
   const truncationNotice = isPodMode && truncation
     ? `Showing top ${truncation.limit} pods by traffic (${truncation.shownNodes}/${truncation.totalNodes}).`
@@ -150,6 +166,14 @@ export default function App() {
           <button
             type="button"
             className="layout-reset-btn"
+            onClick={handleGroupByNode}
+            disabled={!canGroupByNode}
+          >
+            Group by Node
+          </button>
+          <button
+            type="button"
+            className="layout-reset-btn"
             onClick={handleResetLayout}
             disabled={!canResetLayout}
           >
@@ -168,6 +192,8 @@ export default function App() {
         <section className="graph-stage">
           <NetworkGraph
             data={graphData}
+            groupingMode={layoutMode}
+            nodeGroupBoxes={nodeGroupBoxes}
             onLinkClick={handleLinkClick}
             onNodeDrag={handleNodeDrag}
             onNodePositionChange={handleNodePositionChange}
@@ -190,7 +216,7 @@ export default function App() {
           role="status"
           aria-live="polite"
         >
-          Layout reset
+          {layoutToastMessage}
         </div>
       )}
     </div>

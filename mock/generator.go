@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
+	"strconv"
 	"time"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
@@ -35,7 +37,10 @@ type Generator struct {
 	edges         []edge
 	totalW        int
 	replicaCounts map[string]int
+	replicaNodes  map[string]string
 }
+
+var mockNodePool = []string{"worker-a", "worker-b", "worker-c", "worker-d"}
 
 func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
 	edges := []edge{
@@ -61,6 +66,7 @@ func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
 
 	rng := rand.New(rand.NewSource(seed))
 	replicaCounts := buildReplicaCounts(rng, edges)
+	replicaNodes := buildReplicaNodeAssignments(rng, replicaCounts)
 
 	return &Generator{
 		consumer:      consumer,
@@ -68,6 +74,7 @@ func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
 		edges:         edges,
 		totalW:        totalWeight,
 		replicaCounts: replicaCounts,
+		replicaNodes:  replicaNodes,
 	}
 }
 
@@ -165,11 +172,15 @@ func edgeBurstSize(rng *rand.Rand, e edge) int {
 }
 
 func (g *Generator) makeFlow(e edge, verdict flowpb.Verdict, seq int) *flowpb.Flow {
-	src := endpoint(e.srcNS, e.srcSvc, g.randomReplicaIndex(e.srcNS, e.srcSvc))
-	dst := endpoint(e.dstNS, e.dstSvc, g.randomReplicaIndex(e.dstNS, e.dstSvc))
+	srcIdx := g.randomReplicaIndex(e.srcNS, e.srcSvc)
+	dstIdx := g.randomReplicaIndex(e.dstNS, e.dstSvc)
+	src := endpoint(e.srcNS, e.srcSvc, srcIdx)
+	dst := endpoint(e.dstNS, e.dstSvc, dstIdx)
 	if e.dstSvc == "world" {
 		dst = &flowpb.Endpoint{Identity: 1}
 	}
+
+	observerNode, direction := g.observerNodeAndDirection(e.srcNS, e.srcSvc, srcIdx, e.dstNS, e.dstSvc, dstIdx)
 
 	l4 := &flowpb.Layer4{Protocol: &flowpb.Layer4_TCP{TCP: &flowpb.TCP{SourcePort: randomSrcPort(g.rng), DestinationPort: e.dstPort}}}
 	if e.proto == "UDP" {
@@ -177,12 +188,14 @@ func (g *Generator) makeFlow(e edge, verdict flowpb.Verdict, seq int) *flowpb.Fl
 	}
 
 	return &flowpb.Flow{
-		Time:        timestamppb.Now(),
-		Uuid:        fmt.Sprintf("mock-%d-%d", time.Now().UnixNano(), seq),
-		Verdict:     verdict,
-		Source:      src,
-		Destination: dst,
-		L4:          l4,
+		Time:             timestamppb.Now(),
+		Uuid:             fmt.Sprintf("mock-%d-%d", time.Now().UnixNano(), seq),
+		Verdict:          verdict,
+		Source:           src,
+		Destination:      dst,
+		NodeName:         observerNode,
+		TrafficDirection: direction,
+		L4:               l4,
 	}
 }
 
@@ -228,12 +241,56 @@ func replicaKey(namespace, service string) string {
 	return namespace + "/" + service
 }
 
+func replicaInstanceKey(namespace, service string, idx int) string {
+	return replicaKey(namespace, service) + "#" + strconv.Itoa(idx)
+}
+
+func buildReplicaNodeAssignments(rng *rand.Rand, replicaCounts map[string]int) map[string]string {
+	assignments := make(map[string]string)
+	keys := make([]string, 0, len(replicaCounts))
+	for key := range replicaCounts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		count := replicaCounts[key]
+		if count <= 0 {
+			continue
+		}
+		for idx := 0; idx < count; idx++ {
+			instance := key + "#" + strconv.Itoa(idx)
+			assignments[instance] = mockNodePool[rng.Intn(len(mockNodePool))]
+		}
+	}
+	return assignments
+}
+
 func (g *Generator) randomReplicaIndex(namespace, service string) int {
 	count := g.replicaCounts[replicaKey(namespace, service)]
 	if count <= 1 {
 		return 0
 	}
 	return g.rng.Intn(count)
+}
+
+func (g *Generator) observerNodeAndDirection(srcNS, srcSvc string, srcIdx int, dstNS, dstSvc string, dstIdx int) (string, flowpb.TrafficDirection) {
+	srcNode := g.replicaNodes[replicaInstanceKey(srcNS, srcSvc, srcIdx)]
+	dstNode := g.replicaNodes[replicaInstanceKey(dstNS, dstSvc, dstIdx)]
+
+	if srcNode == "" && dstNode == "" {
+		return "", flowpb.TrafficDirection_TRAFFIC_DIRECTION_UNKNOWN
+	}
+	if srcNode == "" {
+		return dstNode, flowpb.TrafficDirection_INGRESS
+	}
+	if dstNode == "" {
+		return srcNode, flowpb.TrafficDirection_EGRESS
+	}
+	if g.rng.Float64() < 0.35 {
+		return dstNode, flowpb.TrafficDirection_INGRESS
+	}
+	return srcNode, flowpb.TrafficDirection_EGRESS
 }
 
 func randomSrcPort(rng *rand.Rand) uint32 {
