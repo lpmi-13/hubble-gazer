@@ -58,6 +58,7 @@ type Graph struct {
 	Nodes      []Node      `json:"nodes"`
 	Links      []Link      `json:"links"`
 	ViewMode   ViewMode    `json:"viewMode"`
+	K8sNodes   []string    `json:"k8sNodes,omitempty"`
 	Truncation *Truncation `json:"truncation,omitempty"`
 }
 
@@ -88,6 +89,7 @@ type Aggregator struct {
 	window   time.Duration
 	flows    []flowRecord
 	nsSet    map[string]struct{}
+	nodeSet  map[string]struct{}
 	maxFlows int
 }
 
@@ -96,6 +98,7 @@ func NewAggregator(window time.Duration) *Aggregator {
 	return &Aggregator{
 		window:   window,
 		nsSet:    make(map[string]struct{}),
+		nodeSet:  make(map[string]struct{}),
 		maxFlows: 100000,
 	}
 }
@@ -152,6 +155,9 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 	if dstNS != "" {
 		a.nsSet[dstNS] = struct{}{}
 	}
+	if nodeName := flow.GetNodeName(); nodeName != "" {
+		a.nodeSet[nodeName] = struct{}{}
+	}
 	// Evict oldest 10% when over capacity to avoid per-insert eviction overhead.
 	if len(a.flows) > a.maxFlows {
 		drop := a.maxFlows / 10
@@ -206,6 +212,18 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 			filtered = append(filtered, f)
 		}
 	}
+
+	var observedNodes []string
+	if viewMode == ViewModePod {
+		observedNodes = make([]string, 0, len(a.nodeSet))
+		for nodeName := range a.nodeSet {
+			if nodeName == "" {
+				continue
+			}
+			observedNodes = append(observedNodes, nodeName)
+		}
+		sort.Strings(observedNodes)
+	}
 	a.mu.Unlock()
 
 	if len(filtered) == 0 {
@@ -213,6 +231,7 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 			Nodes:    []Node{},
 			Links:    []Link{},
 			ViewMode: viewMode,
+			K8sNodes: observedNodes,
 		}
 	}
 
@@ -280,6 +299,7 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 
 	graph := Graph{
 		ViewMode: viewMode,
+		K8sNodes: observedNodes,
 	}
 
 	if viewMode == ViewModePod && options.PodMaxNodes > 0 && len(nodeMap) > options.PodMaxNodes {

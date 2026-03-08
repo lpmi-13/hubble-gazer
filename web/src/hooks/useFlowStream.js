@@ -31,6 +31,7 @@ const LAYOUT_PUSH_EPSILON = 0.001;
 const LAYOUT_PUSH_MULTIPLIER = 2;
 const NODE_GROUP_CIRCLE_MIN_RADIUS = 220;
 const NODE_GROUP_CIRCLE_CHORD_SPACING = 360;
+const NODE_GROUP_CIRCLE_MIN_COUNT_FOR_SPACING = 5;
 const NODE_GROUP_CIRCLE_START_ANGLE = -Math.PI / 2;
 const NODE_GROUP_SLOT_CAPACITY = 12;
 const NODE_GROUP_BASE_RADIUS = 26;
@@ -94,6 +95,47 @@ function nodeGroupKeyForNode(node) {
   return value.length > 0 ? value : 'unknown';
 }
 
+function normalizeKnownK8sNodes(...sources) {
+  const merged = new Set();
+
+  for (const source of sources) {
+    if (!Array.isArray(source)) {
+      continue;
+    }
+    for (const raw of source) {
+      if (typeof raw !== 'string') {
+        continue;
+      }
+      const value = raw.trim();
+      if (value.length === 0) {
+        continue;
+      }
+      merged.add(value);
+    }
+  }
+
+  return [...merged].sort((a, b) => a.localeCompare(b));
+}
+
+function collectKnownK8sNodesFromGraph(nodes) {
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+
+  const keys = [];
+  for (const node of nodes) {
+    if (!node || typeof node.k8sNode !== 'string') {
+      continue;
+    }
+    const key = node.k8sNode.trim();
+    if (key.length === 0) {
+      continue;
+    }
+    keys.push(key);
+  }
+  return normalizeKnownK8sNodes(keys);
+}
+
 function nodeGroupCenters(keys) {
   const centers = new Map();
   if (!Array.isArray(keys) || keys.length === 0) {
@@ -106,7 +148,8 @@ function nodeGroupCenters(keys) {
   }
 
   const count = keys.length;
-  const denominator = 2 * Math.sin(Math.PI / count);
+  const spacingCount = Math.max(count, NODE_GROUP_CIRCLE_MIN_COUNT_FOR_SPACING);
+  const denominator = 2 * Math.sin(Math.PI / spacingCount);
   const requiredRadius = denominator > 0
     ? NODE_GROUP_CIRCLE_CHORD_SPACING / denominator
     : NODE_GROUP_CIRCLE_MIN_RADIUS;
@@ -122,8 +165,14 @@ function nodeGroupCenters(keys) {
   return centers;
 }
 
-function buildNodeGroupLayoutPlan(nodes) {
+function buildNodeGroupLayoutPlan(nodes, knownNodeKeys = []) {
   const groups = new Map();
+  for (const key of normalizeKnownK8sNodes(knownNodeKeys)) {
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+  }
+
   for (const node of nodes) {
     if (!node || typeof node.id !== 'string') {
       continue;
@@ -142,15 +191,17 @@ function buildNodeGroupLayoutPlan(nodes) {
 
   for (const key of orderedKeys) {
     const cluster = groups.get(key);
-    if (!Array.isArray(cluster) || cluster.length === 0) {
+    if (!Array.isArray(cluster)) {
       continue;
     }
 
-    cluster.sort((a, b) => {
-      const aID = typeof a.id === 'string' ? a.id : '';
-      const bID = typeof b.id === 'string' ? b.id : '';
-      return aID.localeCompare(bID);
-    });
+    if (cluster.length > 0) {
+      cluster.sort((a, b) => {
+        const aID = typeof a.id === 'string' ? a.id : '';
+        const bID = typeof b.id === 'string' ? b.id : '';
+        return aID.localeCompare(bID);
+      });
+    }
 
     const center = centers.get(key) || { x: 0, y: 0 };
     const rotation = (hashString(`node-group:${key}`) % 360) * (Math.PI / 180);
@@ -266,6 +317,7 @@ function createInitialModeState() {
     truncation: null,
     layoutMode: LAYOUT_MODES.default,
     nodeGroupBoxes: [],
+    k8sNodes: [],
   };
 }
 
@@ -503,18 +555,96 @@ function applyGroupedLayoutInPlace(nodes) {
   return nodes;
 }
 
-function applyNodeGroupedLayoutInPlace(nodes) {
+function applyGroupedLayoutTargetsInPlace(nodes) {
+  if (!Array.isArray(nodes)) {
+    return nodes;
+  }
+
+  const targetNodes = [];
+  for (const node of nodes) {
+    if (!node || typeof node.id !== 'string') {
+      continue;
+    }
+    const pos = groupedPositionForNode(node);
+    targetNodes.push({
+      id: node.id,
+      x: pos.x,
+      y: pos.y,
+    });
+  }
+
+  resolveLayoutOverlapsInPlace(targetNodes);
+
+  const targetById = new Map();
+  for (const target of targetNodes) {
+    targetById.set(target.id, target);
+  }
+
+  for (const node of nodes) {
+    if (!node || typeof node.id !== 'string') {
+      continue;
+    }
+    const target = targetById.get(node.id);
+    if (!target) {
+      continue;
+    }
+
+    node.layoutTargetX = target.x;
+    node.layoutTargetY = target.y;
+
+    if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+      setNodeFixedPosition(node, target.x, target.y);
+      continue;
+    }
+
+    node.fx = node.x;
+    node.fy = node.y;
+    node.vx = 0;
+    node.vy = 0;
+  }
+
+  return nodes;
+}
+
+function applyNodeGroupedLayoutInPlace(nodes, pinnedPositions = null, immobileNodeIds = null, knownNodeKeys = []) {
   if (!Array.isArray(nodes)) {
     return [];
   }
 
-  const plan = buildNodeGroupLayoutPlan(nodes);
+  const plan = buildNodeGroupLayoutPlan(nodes, knownNodeKeys);
   const boxesByKey = nodeGroupBoxMap(plan.boxes);
-  const targetNodes = [];
-  for (const [id, target] of plan.targetsByID.entries()) {
-    targetNodes.push({ id, x: target.x, y: target.y });
+  const nodesById = new Map();
+  for (const node of nodes) {
+    if (!node || typeof node.id !== 'string') {
+      continue;
+    }
+    nodesById.set(node.id, node);
   }
-  resolveLayoutOverlapsInPlace(targetNodes);
+  const targetNodes = [];
+  const pinnedNodeIds = new Set();
+  for (const [id, target] of plan.targetsByID.entries()) {
+    let x = target.x;
+    let y = target.y;
+
+    if (pinnedPositions instanceof Map) {
+      const pinned = pinnedPositions.get(id);
+      if (pinned && Number.isFinite(pinned.x) && Number.isFinite(pinned.y)) {
+        const node = nodesById.get(id) || { id };
+        const clampedPinned = clampPointToGroupBox(boxesByKey, node, pinned.x, pinned.y);
+        x = clampedPinned.x;
+        y = clampedPinned.y;
+        pinnedNodeIds.add(id);
+      }
+    }
+
+    targetNodes.push({ id, x, y });
+  }
+  const immobile = new Set(immobileNodeIds || []);
+  for (const id of pinnedNodeIds) {
+    immobile.add(id);
+  }
+
+  resolveLayoutOverlapsInPlace(targetNodes, immobile.size > 0 ? immobile : null);
   const targetById = new Map();
   for (const target of targetNodes) {
     targetById.set(target.id, target);
@@ -813,7 +943,7 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
         };
       }
 
-      applyGroupedLayoutInPlace(graphData.nodes);
+      applyGroupedLayoutTargetsInPlace(graphData.nodes);
 
       return {
         ...prev,
@@ -844,10 +974,16 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
     setModeState((prev) => {
       const currentModeState = prev[mode];
       const graphData = currentModeState.graphData;
-      let nodeGroupBoxes = [];
-      if (graphData.nodes.length > 0) {
-        nodeGroupBoxes = applyNodeGroupedLayoutInPlace(graphData.nodes);
-      }
+      const knownNodeKeys = normalizeKnownK8sNodes(
+        currentModeState.k8sNodes,
+        collectKnownK8sNodesFromGraph(graphData.nodes),
+      );
+      const nodeGroupBoxes = applyNodeGroupedLayoutInPlace(
+        graphData.nodes,
+        nodePositionsRef.current[mode],
+        draggingNodeIdsRef.current[mode],
+        knownNodeKeys,
+      );
 
       return {
         ...prev,
@@ -907,9 +1043,21 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
               nodePositionsRef.current[mode],
               draggingNodeIdsRef.current[mode],
             );
+            const k8sNodes = mode === VIEW_MODES.pod
+              ? normalizeKnownK8sNodes(
+                currentModeState.k8sNodes,
+                incoming?.k8sNodes,
+                collectKnownK8sNodesFromGraph(graphData.nodes),
+              )
+              : currentModeState.k8sNodes;
             let nodeGroupBoxes = currentModeState.nodeGroupBoxes;
             if (mode === VIEW_MODES.pod && currentModeState.layoutMode === LAYOUT_MODES.k8sNode) {
-              nodeGroupBoxes = applyNodeGroupedLayoutInPlace(graphData.nodes);
+              nodeGroupBoxes = applyNodeGroupedLayoutInPlace(
+                graphData.nodes,
+                nodePositionsRef.current[mode],
+                draggingNodeIdsRef.current[mode],
+                k8sNodes,
+              );
             }
 
             return {
@@ -919,6 +1067,7 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
                 graphData,
                 truncation: normalizeTruncation(incoming?.truncation),
                 nodeGroupBoxes,
+                k8sNodes,
               },
             };
           });
@@ -964,5 +1113,6 @@ export const __TEST_ONLY__ = {
   resolveDraggedNodeOverlap,
   mergeGraphUpdate,
   applyGroupedLayoutInPlace,
+  applyGroupedLayoutTargetsInPlace,
   applyNodeGroupedLayoutInPlace,
 };

@@ -175,6 +175,45 @@ func TestSnapshotWithOptionsPodViewAppliesTopNTruncation(t *testing.T) {
 	}
 }
 
+func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsAllObservedK8sNodes(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"other", "frontend", "frontend-0",
+		"other", "api", "api-0",
+		"node-b", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+
+	filtered := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace: "demo",
+		ViewMode:  ViewModePod,
+	})
+	if len(filtered.K8sNodes) != 2 {
+		t.Fatalf("expected 2 observed k8s nodes, got %d", len(filtered.K8sNodes))
+	}
+	if filtered.K8sNodes[0] != "node-a" || filtered.K8sNodes[1] != "node-b" {
+		t.Fatalf("unexpected k8s node list: %#v", filtered.K8sNodes)
+	}
+
+	emptyFiltered := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace: "missing",
+		ViewMode:  ViewModePod,
+	})
+	if len(emptyFiltered.Nodes) != 0 {
+		t.Fatalf("expected 0 pod nodes for missing namespace, got %d", len(emptyFiltered.Nodes))
+	}
+	if len(emptyFiltered.K8sNodes) != 2 {
+		t.Fatalf("expected observed k8s nodes to remain visible, got %d", len(emptyFiltered.K8sNodes))
+	}
+}
+
 func newFlow(srcNS, srcApp, dstNS, dstApp string, verdict flowpb.Verdict, protocol string) *flowpb.Flow {
 	return newFlowWithPods(
 		srcNS,
