@@ -95,6 +95,9 @@ func (g *Generator) Run(ctx context.Context) {
 				verdict = flowpb.Verdict_DROPPED
 			}
 			g.consumer.AddFlow(g.makeFlow(e, verdict, counter))
+			for _, l7Flow := range g.makeL7Flows(e, verdict, counter) {
+				g.consumer.AddFlow(l7Flow)
+			}
 			counter++
 		}
 
@@ -108,6 +111,9 @@ func (g *Generator) Run(ctx context.Context) {
 			surgeCount := 8 + g.rng.Intn(7)
 			for i := 0; i < surgeCount; i++ {
 				g.consumer.AddFlow(g.makeFlow(surge, flowpb.Verdict_FORWARDED, counter+i))
+				for _, l7Flow := range g.makeL7Flows(surge, flowpb.Verdict_FORWARDED, counter+i) {
+					g.consumer.AddFlow(l7Flow)
+				}
 			}
 		}
 
@@ -190,6 +196,7 @@ func (g *Generator) makeFlow(e edge, verdict flowpb.Verdict, seq int) *flowpb.Fl
 	return &flowpb.Flow{
 		Time:             timestamppb.Now(),
 		Uuid:             fmt.Sprintf("mock-%d-%d", time.Now().UnixNano(), seq),
+		Type:             flowpb.FlowType_L3_L4,
 		Verdict:          verdict,
 		Source:           src,
 		Destination:      dst,
@@ -197,6 +204,140 @@ func (g *Generator) makeFlow(e edge, verdict flowpb.Verdict, seq int) *flowpb.Fl
 		TrafficDirection: direction,
 		L4:               l4,
 	}
+}
+
+func (g *Generator) makeL7Flows(e edge, verdict flowpb.Verdict, seq int) []*flowpb.Flow {
+	if verdict != flowpb.Verdict_FORWARDED {
+		return nil
+	}
+
+	switch {
+	case e.proto == "UDP" && e.dstPort == 53:
+		return g.makeDNSFlows(e, seq)
+	case e.proto == "TCP" && e.dstSvc != "world":
+		return g.makeHTTPFlows(e, seq)
+	default:
+		return nil
+	}
+}
+
+func (g *Generator) makeHTTPFlows(e edge, seq int) []*flowpb.Flow {
+	srcIdx := g.randomReplicaIndex(e.srcNS, e.srcSvc)
+	dstIdx := g.randomReplicaIndex(e.dstNS, e.dstSvc)
+	src := endpoint(e.srcNS, e.srcSvc, srcIdx)
+	dst := endpoint(e.dstNS, e.dstSvc, dstIdx)
+	observerNode, direction := g.observerNodeAndDirection(e.srcNS, e.srcSvc, srcIdx, e.dstNS, e.dstSvc, dstIdx)
+	method := mockHTTPMethod(g.rng, e)
+	url := mockHTTPURL(e, method)
+	statusCode := mockHTTPStatusCode(g.rng, seq)
+	latencyNs := mockLatencyNs(g.rng, statusCode)
+
+	request := &flowpb.Flow{
+		Time:             timestamppb.Now(),
+		Uuid:             fmt.Sprintf("mock-http-req-%d-%d", time.Now().UnixNano(), seq),
+		Type:             flowpb.FlowType_L7,
+		Verdict:          flowpb.Verdict_FORWARDED,
+		Source:           src,
+		Destination:      dst,
+		NodeName:         observerNode,
+		TrafficDirection: direction,
+		L4:               &flowpb.Layer4{Protocol: &flowpb.Layer4_TCP{TCP: &flowpb.TCP{SourcePort: randomSrcPort(g.rng), DestinationPort: e.dstPort}}},
+		L7: &flowpb.Layer7{
+			Type: flowpb.L7FlowType_REQUEST,
+			Record: &flowpb.Layer7_Http{
+				Http: &flowpb.HTTP{
+					Method:   method,
+					Url:      url,
+					Protocol: "HTTP/1.1",
+				},
+			},
+		},
+	}
+
+	response := &flowpb.Flow{
+		Time:             timestamppb.Now(),
+		Uuid:             fmt.Sprintf("mock-http-res-%d-%d", time.Now().UnixNano(), seq),
+		Type:             flowpb.FlowType_L7,
+		Verdict:          flowpb.Verdict_FORWARDED,
+		Source:           src,
+		Destination:      dst,
+		NodeName:         observerNode,
+		TrafficDirection: direction,
+		L4:               &flowpb.Layer4{Protocol: &flowpb.Layer4_TCP{TCP: &flowpb.TCP{SourcePort: randomSrcPort(g.rng), DestinationPort: e.dstPort}}},
+		L7: &flowpb.Layer7{
+			Type:      flowpb.L7FlowType_RESPONSE,
+			LatencyNs: latencyNs,
+			Record: &flowpb.Layer7_Http{
+				Http: &flowpb.HTTP{
+					Code:     statusCode,
+					Method:   method,
+					Url:      url,
+					Protocol: "HTTP/1.1",
+				},
+			},
+		},
+	}
+
+	return []*flowpb.Flow{request, response}
+}
+
+func (g *Generator) makeDNSFlows(e edge, seq int) []*flowpb.Flow {
+	srcIdx := g.randomReplicaIndex(e.srcNS, e.srcSvc)
+	dstIdx := g.randomReplicaIndex(e.dstNS, e.dstSvc)
+	src := endpoint(e.srcNS, e.srcSvc, srcIdx)
+	dst := endpoint(e.dstNS, e.dstSvc, dstIdx)
+	observerNode, direction := g.observerNodeAndDirection(e.srcNS, e.srcSvc, srcIdx, e.dstNS, e.dstSvc, dstIdx)
+	query := mockDNSQuery(g.rng)
+	latencyNs := uint64((2 + g.rng.Intn(9)) * int(time.Millisecond))
+
+	request := &flowpb.Flow{
+		Time:             timestamppb.Now(),
+		Uuid:             fmt.Sprintf("mock-dns-req-%d-%d", time.Now().UnixNano(), seq),
+		Type:             flowpb.FlowType_L7,
+		Verdict:          flowpb.Verdict_FORWARDED,
+		Source:           src,
+		Destination:      dst,
+		NodeName:         observerNode,
+		TrafficDirection: direction,
+		L4:               &flowpb.Layer4{Protocol: &flowpb.Layer4_UDP{UDP: &flowpb.UDP{SourcePort: randomSrcPort(g.rng), DestinationPort: e.dstPort}}},
+		L7: &flowpb.Layer7{
+			Type: flowpb.L7FlowType_REQUEST,
+			Record: &flowpb.Layer7_Dns{
+				Dns: &flowpb.DNS{
+					Query:  query,
+					Qtypes: []string{"A"},
+				},
+			},
+		},
+	}
+
+	response := &flowpb.Flow{
+		Time:             timestamppb.Now(),
+		Uuid:             fmt.Sprintf("mock-dns-res-%d-%d", time.Now().UnixNano(), seq),
+		Type:             flowpb.FlowType_L7,
+		Verdict:          flowpb.Verdict_FORWARDED,
+		Source:           src,
+		Destination:      dst,
+		NodeName:         observerNode,
+		TrafficDirection: direction,
+		L4:               &flowpb.Layer4{Protocol: &flowpb.Layer4_UDP{UDP: &flowpb.UDP{SourcePort: randomSrcPort(g.rng), DestinationPort: e.dstPort}}},
+		L7: &flowpb.Layer7{
+			Type:      flowpb.L7FlowType_RESPONSE,
+			LatencyNs: latencyNs,
+			Record: &flowpb.Layer7_Dns{
+				Dns: &flowpb.DNS{
+					Query:   query,
+					Ips:     []string{"10.96.0.10"},
+					Ttl:     30,
+					Rcode:   0,
+					Qtypes:  []string{"A"},
+					Rrtypes: []string{"A"},
+				},
+			},
+		},
+	}
+
+	return []*flowpb.Flow{request, response}
 }
 
 func endpoint(namespace, service string, idx int) *flowpb.Endpoint {
@@ -295,4 +436,69 @@ func (g *Generator) observerNodeAndDirection(srcNS, srcSvc string, srcIdx int, d
 
 func randomSrcPort(rng *rand.Rand) uint32 {
 	return uint32(30000 + rng.Intn(20000))
+}
+
+func mockHTTPMethod(rng *rand.Rand, e edge) string {
+	if e.dstSvc == "api" && rng.Float64() < 0.3 {
+		return "POST"
+	}
+	if e.dstSvc == "ratings" && rng.Float64() < 0.18 {
+		return "PUT"
+	}
+	return "GET"
+}
+
+func mockHTTPURL(e edge, method string) string {
+	switch e.dstSvc {
+	case "reviews":
+		return "/reviews"
+	case "details":
+		return "/details"
+	case "ratings":
+		if method == "PUT" {
+			return "/ratings/cache"
+		}
+		return "/ratings"
+	case "api":
+		if method == "POST" {
+			return "/checkout"
+		}
+		return "/products"
+	default:
+		return "/"
+	}
+}
+
+func mockHTTPStatusCode(rng *rand.Rand, seq int) uint32 {
+	if seq%29 == 0 {
+		return 503
+	}
+	roll := rng.Float64()
+	switch {
+	case roll < 0.08:
+		return 404
+	case roll < 0.11:
+		return 502
+	case roll < 0.18:
+		return 201
+	default:
+		return 200
+	}
+}
+
+func mockLatencyNs(rng *rand.Rand, statusCode uint32) uint64 {
+	ms := 8 + rng.Intn(28)
+	if statusCode >= 500 {
+		ms += 40 + rng.Intn(90)
+	}
+	return uint64(ms) * uint64(time.Millisecond)
+}
+
+func mockDNSQuery(rng *rand.Rand) string {
+	queries := []string{
+		"reviews.demo.svc.cluster.local.",
+		"details.demo.svc.cluster.local.",
+		"api.default.svc.cluster.local.",
+	}
+	return queries[rng.Intn(len(queries))]
 }

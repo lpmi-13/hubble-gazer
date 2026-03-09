@@ -9,6 +9,13 @@ const VIEW_MODES = Object.freeze({
   pod: 'pod',
 });
 
+const TRAFFIC_LAYERS = Object.freeze({
+  l4: 'l4',
+  l7: 'l7',
+});
+
+const TRAFFIC_LAYER_STORAGE_KEY = 'hubble-gazer-traffic-layer:v1';
+
 function getEndpointId(endpoint) {
   if (endpoint && typeof endpoint === 'object') {
     return endpoint.id || endpoint.label;
@@ -26,7 +33,16 @@ function getLinkKey(link) {
 export default function App() {
   const [namespace, setNamespace] = useState('');
   const [viewMode, setViewMode] = useState(VIEW_MODES.service);
+  const [trafficLayer, setTrafficLayer] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(TRAFFIC_LAYER_STORAGE_KEY);
+      return stored === TRAFFIC_LAYERS.l7 ? TRAFFIC_LAYERS.l7 : TRAFFIC_LAYERS.l4;
+    } catch {
+      return TRAFFIC_LAYERS.l4;
+    }
+  });
   const [selectedLinkKey, setSelectedLinkKey] = useState(null);
+  const [mobileControlsOpen, setMobileControlsOpen] = useState(false);
   const [layoutToastVisible, setLayoutToastVisible] = useState(false);
   const [layoutToastKey, setLayoutToastKey] = useState(0);
   const [layoutToastMessage, setLayoutToastMessage] = useState('Layout reset');
@@ -36,11 +52,12 @@ export default function App() {
     truncation,
     layoutMode,
     nodeGroupBoxes,
+    podNodeCount,
     trackNodePosition,
     persistNodePosition,
     resetLayout,
     groupByK8sNode,
-  } = useFlowStream(namespace, viewMode);
+  } = useFlowStream(namespace, viewMode, trafficLayer);
 
   const handleLinkClick = useCallback((link) => {
     setSelectedLinkKey(getLinkKey(link));
@@ -66,6 +83,19 @@ export default function App() {
     setSelectedLinkKey(null);
   }, [viewMode]);
 
+  const handleTrafficLayerChange = useCallback((layer) => {
+    if (layer === trafficLayer) {
+      return;
+    }
+    setTrafficLayer(layer);
+    setSelectedLinkKey(null);
+  }, [trafficLayer]);
+
+  const handleNamespaceChange = useCallback((nextNamespace) => {
+    setNamespace(nextNamespace);
+    setSelectedLinkKey(null);
+  }, []);
+
   const handleResetLayout = useCallback(() => {
     resetLayout();
     setLayoutToastMessage('Layout reset');
@@ -74,11 +104,19 @@ export default function App() {
   }, [resetLayout]);
 
   const handleGroupByNode = useCallback(() => {
+    if (viewMode !== VIEW_MODES.pod) {
+      setViewMode(VIEW_MODES.pod);
+      setSelectedLinkKey(null);
+    }
     groupByK8sNode();
     setLayoutToastMessage('Grouped by Kubernetes node');
     setLayoutToastVisible(true);
     setLayoutToastKey((prev) => prev + 1);
-  }, [groupByK8sNode]);
+  }, [groupByK8sNode, viewMode]);
+
+  const handleMainInteraction = useCallback(() => {
+    setMobileControlsOpen((prev) => (prev ? false : prev));
+  }, []);
 
   useEffect(() => {
     if (!layoutToastVisible) {
@@ -90,6 +128,14 @@ export default function App() {
     return () => window.clearTimeout(timeout);
   }, [layoutToastVisible, layoutToastKey]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TRAFFIC_LAYER_STORAGE_KEY, trafficLayer);
+    } catch {
+      // Ignore storage errors.
+    }
+  }, [trafficLayer]);
+
   const selectedLink = useMemo(() => {
     if (!selectedLinkKey) {
       return null;
@@ -98,35 +144,52 @@ export default function App() {
   }, [graphData.links, selectedLinkKey]);
 
   const totals = useMemo(() => {
-    const droppedEdges = graphData.links.filter((link) => link.verdict === 'DROPPED').length;
+    const alertEdges = graphData.links.filter((link) => (
+      trafficLayer === TRAFFIC_LAYERS.l7
+        ? Number(link?.l7?.http?.statusClassMix?.['5xx']) > 0
+        : link.verdict === 'DROPPED'
+    )).length;
     return {
       nodes: graphData.nodes.length,
       edges: graphData.links.length,
-      droppedEdges,
+      alertEdges,
     };
-  }, [graphData.links, graphData.nodes.length]);
+  }, [graphData.links, graphData.nodes.length, trafficLayer]);
 
   const canResetLayout = graphData.nodes.length > 0;
   const isPodMode = viewMode === VIEW_MODES.pod;
   const isNodeGroupMode = isPodMode && layoutMode === 'k8sNode';
-  const canGroupByNode = isPodMode && graphData.nodes.length > 0;
+  const canGroupByNode = podNodeCount > 0;
+  const viewportResetKey = `${viewMode}:${namespace || 'all'}:${layoutMode || 'default'}`;
   const graphHint = isPodMode
     ? (isNodeGroupMode
       ? 'Node-group mode active: pods are constrained inside worker-node boundaries.'
-      : 'Pod view is live and can be dense; use Group by Node to cluster pods by Kubernetes worker.')
-    : 'Drag nodes to pin placement while telemetry continues streaming.';
+      : 'Pod view keeps pods visible for the selected namespace; use Group by Node to cluster replicas by worker.')
+    : (trafficLayer === TRAFFIC_LAYERS.l7
+      ? 'Application mode shows L7 request and response events; HTTP details appear when available.'
+      : 'Drag nodes to pin placement while telemetry continues streaming.');
   const truncationNotice = isPodMode && truncation
     ? `Showing top ${truncation.limit} pods by traffic (${truncation.shownNodes}/${truncation.totalNodes}).`
     : null;
+  const alertLabel = trafficLayer === TRAFFIC_LAYERS.l7 ? 'HTTP 5xx' : 'Dropped';
 
   return (
     <div className="app">
       <div className="app-background" aria-hidden="true" />
-      <header className="header" role="banner">
+      <header className={`header ${mobileControlsOpen ? 'mobile-controls-open' : ''}`} role="banner">
         <div className="header-brand">
           <p className="header-kicker">Realtime Service Topology</p>
           <h1>Hubble Gazer</h1>
         </div>
+        <button
+          type="button"
+          className={`mobile-controls-toggle ${connected ? 'connected' : 'disconnected'}`}
+          aria-expanded={mobileControlsOpen}
+          onClick={() => setMobileControlsOpen((prev) => !prev)}
+        >
+          <span>{mobileControlsOpen ? 'Hide Controls' : 'Controls'}</span>
+          <span className="mobile-controls-toggle-state">{connected ? 'Live' : 'Retrying'}</span>
+        </button>
         <div className="header-stats" aria-live="polite">
           <div className="stat-pill">
             <span className="stat-pill-label">Nodes</span>
@@ -137,12 +200,32 @@ export default function App() {
             <span className="stat-pill-value">{totals.edges}</span>
           </div>
           <div className="stat-pill stat-pill-alert">
-            <span className="stat-pill-label">Dropped</span>
-            <span className="stat-pill-value">{totals.droppedEdges}</span>
+            <span className="stat-pill-label">{alertLabel}</span>
+            <span className="stat-pill-value">{totals.alertEdges}</span>
           </div>
         </div>
         <div className="header-controls">
-          <NamespaceSelector value={namespace} onChange={setNamespace} />
+          <NamespaceSelector value={namespace} onChange={handleNamespaceChange} />
+          <div className="view-mode-toggle" role="tablist" aria-label="Traffic layer">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={trafficLayer === TRAFFIC_LAYERS.l4}
+              className={`view-mode-btn ${trafficLayer === TRAFFIC_LAYERS.l4 ? 'active' : ''}`}
+              onClick={() => handleTrafficLayerChange(TRAFFIC_LAYERS.l4)}
+            >
+              Network (L4)
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={trafficLayer === TRAFFIC_LAYERS.l7}
+              className={`view-mode-btn ${trafficLayer === TRAFFIC_LAYERS.l7 ? 'active' : ''}`}
+              onClick={() => handleTrafficLayerChange(TRAFFIC_LAYERS.l7)}
+            >
+              Application (L7)
+            </button>
+          </div>
           <div className="view-mode-toggle" role="tablist" aria-label="Graph view mode">
             <button
               type="button"
@@ -188,12 +271,18 @@ export default function App() {
           </span>
         </div>
       </header>
-      <main className={`main ${selectedLink ? 'main-panel-open' : ''}`} role="main">
+      <main
+        className={`main ${selectedLink ? 'main-panel-open' : ''}`}
+        role="main"
+        onPointerUpCapture={handleMainInteraction}
+      >
         <section className="graph-stage">
           <NetworkGraph
             data={graphData}
+            trafficLayer={trafficLayer}
             groupingMode={layoutMode}
             nodeGroupBoxes={nodeGroupBoxes}
+            viewportResetKey={viewportResetKey}
             onLinkClick={handleLinkClick}
             onNodeDrag={handleNodeDrag}
             onNodePositionChange={handleNodePositionChange}
@@ -206,7 +295,7 @@ export default function App() {
           <p className="graph-hint">{graphHint}</p>
         </section>
         {selectedLink && (
-          <FlowPanel link={selectedLink} onClose={handleClosePanel} />
+          <FlowPanel link={selectedLink} trafficLayer={trafficLayer} onClose={handleClosePanel} />
         )}
       </main>
       {layoutToastVisible && (

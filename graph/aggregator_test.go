@@ -7,6 +7,23 @@ import (
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 )
 
+func TestParseTrafficLayer(t *testing.T) {
+	layer, ok := ParseTrafficLayer("l4")
+	if !ok || layer != TrafficLayerL4 {
+		t.Fatalf("expected l4 to parse")
+	}
+
+	layer, ok = ParseTrafficLayer("l7")
+	if !ok || layer != TrafficLayerL7 {
+		t.Fatalf("expected l7 to parse")
+	}
+
+	layer, ok = ParseTrafficLayer("bogus")
+	if ok || layer != TrafficLayerL4 {
+		t.Fatalf("expected bogus layer to fail and fall back to l4, got %q ok=%v", layer, ok)
+	}
+}
+
 func TestSnapshotIncludesProtocolMixAndDominantProtocol(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
 
@@ -214,6 +231,109 @@ func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsAllObservedK8sNodes(t *te
 	}
 }
 
+func TestSnapshotWithOptionsL7AggregatesHTTPDetails(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newHTTPFlow("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.L7FlowType_REQUEST, "GET", 0, 0))
+	aggregator.AddFlow(newHTTPFlow("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.L7FlowType_REQUEST, "GET", 0, 0))
+	aggregator.AddFlow(newHTTPFlow("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.L7FlowType_REQUEST, "POST", 0, 0))
+	aggregator.AddFlow(newHTTPFlow("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.L7FlowType_RESPONSE, "GET", 200, 10*time.Millisecond))
+	aggregator.AddFlow(newHTTPFlow("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.L7FlowType_RESPONSE, "GET", 404, 20*time.Millisecond))
+	aggregator.AddFlow(newHTTPFlow("demo", "frontend", "frontend-0", "demo", "api", "api-0", flowpb.L7FlowType_RESPONSE, "POST", 503, 90*time.Millisecond))
+	aggregator.AddFlow(newFlow("demo", "frontend", "demo", "db", flowpb.Verdict_FORWARDED, "TCP"))
+
+	snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace:    "demo",
+		ViewMode:     ViewModeService,
+		TrafficLayer: TrafficLayerL7,
+	})
+
+	if snapshot.TrafficLayer != TrafficLayerL7 {
+		t.Fatalf("expected traffic layer l7, got %q", snapshot.TrafficLayer)
+	}
+	if len(snapshot.Links) != 1 {
+		t.Fatalf("expected 1 l7 link, got %d", len(snapshot.Links))
+	}
+
+	link := snapshot.Links[0]
+	if link.Protocol != "HTTP" {
+		t.Fatalf("expected dominant protocol HTTP, got %q", link.Protocol)
+	}
+	if link.FlowCount != 6 {
+		t.Fatalf("expected 6 l7 events, got %d", link.FlowCount)
+	}
+	if link.L7 == nil || link.L7.HTTP == nil {
+		t.Fatalf("expected l7 http details to be present")
+	}
+	if link.L7.RequestCount != 3 || link.L7.ResponseCount != 3 {
+		t.Fatalf("unexpected request/response counts: %+v", link.L7)
+	}
+	if link.L7.HTTP.StatusClassMix["2xx"] != 1 || link.L7.HTTP.StatusClassMix["4xx"] != 1 || link.L7.HTTP.StatusClassMix["5xx"] != 1 {
+		t.Fatalf("unexpected status class mix: %#v", link.L7.HTTP.StatusClassMix)
+	}
+	if link.L7.HTTP.MethodMix["GET"] != 2 || link.L7.HTTP.MethodMix["POST"] != 1 {
+		t.Fatalf("unexpected method mix: %#v", link.L7.HTTP.MethodMix)
+	}
+	if link.SuccessRate >= 0.67 || link.SuccessRate <= 0.65 {
+		t.Fatalf("expected http success rate near 2/3, got %f", link.SuccessRate)
+	}
+	if link.L7.HTTP.P50LatencyMs <= 0 || link.L7.HTTP.P95LatencyMs < link.L7.HTTP.P50LatencyMs {
+		t.Fatalf("unexpected latency percentiles: p50=%f p95=%f", link.L7.HTTP.P50LatencyMs, link.L7.HTTP.P95LatencyMs)
+	}
+}
+
+func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsObservedPodsWithoutCurrentTrafficAcrossLayers(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+	aggregator.AddFlow(newHTTPFlowWithNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.L7FlowType_REQUEST, "GET", 0, 0,
+	))
+
+	aggregator.mu.Lock()
+	for i := range aggregator.flows {
+		aggregator.flows[i].timestamp = time.Now().Add(-2 * aggregator.window)
+	}
+	aggregator.mu.Unlock()
+
+	l4Snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace:    "demo",
+		ViewMode:     ViewModePod,
+		TrafficLayer: TrafficLayerL4,
+		PodMaxNodes:  1,
+	})
+	if len(l4Snapshot.Nodes) != 2 {
+		t.Fatalf("expected idle pods to remain visible in l4 pod view, got %d nodes", len(l4Snapshot.Nodes))
+	}
+	if l4Snapshot.Truncation != nil {
+		t.Fatalf("did not expect truncation for namespace-filtered pod view")
+	}
+
+	l7Snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace:    "demo",
+		ViewMode:     ViewModePod,
+		TrafficLayer: TrafficLayerL7,
+		PodMaxNodes:  1,
+	})
+	if len(l7Snapshot.Nodes) != 2 {
+		t.Fatalf("expected idle pods to remain visible in l7 pod view, got %d nodes", len(l7Snapshot.Nodes))
+	}
+	if len(l7Snapshot.Links) != 0 {
+		t.Fatalf("expected no active l7 links after window expiry, got %d", len(l7Snapshot.Links))
+	}
+	if l7Snapshot.Truncation != nil {
+		t.Fatalf("did not expect truncation for namespace-filtered l7 pod view")
+	}
+}
+
 func newFlow(srcNS, srcApp, dstNS, dstApp string, verdict flowpb.Verdict, protocol string) *flowpb.Flow {
 	return newFlowWithPods(
 		srcNS,
@@ -258,6 +378,55 @@ func newFlowWithPodsOnNode(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod, nodeNam
 		TrafficDirection: direction,
 		Verdict:          verdict,
 		L4:               protocolLayer(protocol),
+	}
+}
+
+func newHTTPFlow(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod string, flowType flowpb.L7FlowType, method string, code uint32, latency time.Duration) *flowpb.Flow {
+	return newHTTPFlowWithNode(
+		srcNS,
+		srcApp,
+		srcPod,
+		dstNS,
+		dstApp,
+		dstPod,
+		"",
+		flowpb.TrafficDirection_TRAFFIC_DIRECTION_UNKNOWN,
+		flowType,
+		method,
+		code,
+		latency,
+	)
+}
+
+func newHTTPFlowWithNode(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod, nodeName string, direction flowpb.TrafficDirection, flowType flowpb.L7FlowType, method string, code uint32, latency time.Duration) *flowpb.Flow {
+	return &flowpb.Flow{
+		Source: &flowpb.Endpoint{
+			Namespace: srcNS,
+			PodName:   srcPod,
+			Labels:    []string{"app=" + srcApp},
+		},
+		Destination: &flowpb.Endpoint{
+			Namespace: dstNS,
+			PodName:   dstPod,
+			Labels:    []string{"app=" + dstApp},
+		},
+		Type:             flowpb.FlowType_L7,
+		NodeName:         nodeName,
+		TrafficDirection: direction,
+		Verdict:          flowpb.Verdict_FORWARDED,
+		L4:               protocolLayer("TCP"),
+		L7: &flowpb.Layer7{
+			Type:      flowType,
+			LatencyNs: uint64(latency),
+			Record: &flowpb.Layer7_Http{
+				Http: &flowpb.HTTP{
+					Method:   method,
+					Code:     code,
+					Url:      "/api",
+					Protocol: "HTTP/1.1",
+				},
+			},
+		},
 	}
 }
 

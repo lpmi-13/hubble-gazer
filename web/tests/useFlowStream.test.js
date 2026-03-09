@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { __TEST_ONLY__ } from '../src/hooks/useFlowStream.js';
 
 const {
+  TRAFFIC_LAYERS,
+  buildFlowStreamPath,
   nodeRadius,
   setNodeFixedPosition,
   resolveDraggedNodeOverlap,
@@ -12,6 +14,17 @@ const {
   applyGroupedLayoutTargetsInPlace,
   applyNodeGroupedLayoutInPlace,
 } = __TEST_ONLY__;
+
+test('buildFlowStreamPath includes view namespace and traffic layer', () => {
+  assert.equal(
+    buildFlowStreamPath('demo', 'pod', TRAFFIC_LAYERS.l7),
+    '/api/flows?view=pod&layer=l7&namespace=demo',
+  );
+  assert.equal(
+    buildFlowStreamPath('', 'service', 'bogus'),
+    '/api/flows?view=service&layer=l4',
+  );
+});
 
 test('setNodeFixedPosition pins node and clears velocity', () => {
   const node = { id: 'n1', x: 4, y: 9, vx: 10, vy: -6 };
@@ -134,6 +147,64 @@ test('mergeGraphUpdate updates live link metrics in place', () => {
   assert.deepEqual(link.protocolMix, incomingMix);
   assert.notEqual(link.protocolMix, incomingMix);
   assert.equal(link.verdict, 'DROPPED');
+});
+
+test('mergeGraphUpdate refreshes nested l7 metrics in place', () => {
+  const link = {
+    source: 'default/frontend',
+    target: 'default/api',
+    flowRate: 1.2,
+    flowCount: 4,
+    successRate: 1,
+    protocol: 'HTTP',
+    protocolMix: { HTTP: 4 },
+    verdict: 'FORWARDED',
+    l7: {
+      requestCount: 2,
+      responseCount: 2,
+      http: {
+        statusClassMix: { '2xx': 2 },
+        methodMix: { GET: 2 },
+        p50LatencyMs: 12,
+        p95LatencyMs: 22,
+      },
+    },
+  };
+
+  const prev = { nodes: [], links: [link] };
+  const incoming = {
+    nodes: [],
+    links: [{
+      source: 'default/frontend',
+      target: 'default/api',
+      flowRate: 2.8,
+      flowCount: 8,
+      successRate: 0.75,
+      protocol: 'HTTP',
+      protocolMix: { HTTP: 6, DNS: 2 },
+      verdict: 'FORWARDED',
+      l7: {
+        requestCount: 4,
+        responseCount: 4,
+        http: {
+          statusClassMix: { '2xx': 3, '5xx': 1 },
+          methodMix: { GET: 3, POST: 1 },
+          p50LatencyMs: 18,
+          p95LatencyMs: 80,
+        },
+      },
+    }],
+  };
+
+  const next = mergeGraphUpdate(prev, incoming, new Map(), new Set());
+
+  assert.equal(next.links[0], link);
+  assert.equal(link.l7.requestCount, 4);
+  assert.equal(link.l7.responseCount, 4);
+  assert.deepEqual(link.l7.http.statusClassMix, { '2xx': 3, '5xx': 1 });
+  assert.deepEqual(link.l7.http.methodMix, { GET: 3, POST: 1 });
+  assert.equal(link.l7.http.p50LatencyMs, 18);
+  assert.equal(link.l7.http.p95LatencyMs, 80);
 });
 
 test('mergeGraphUpdate computes separated layout targets during live updates', () => {

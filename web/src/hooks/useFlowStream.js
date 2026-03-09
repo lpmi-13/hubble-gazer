@@ -5,6 +5,11 @@ const VIEW_MODES = Object.freeze({
   pod: 'pod',
 });
 
+const TRAFFIC_LAYERS = Object.freeze({
+  l4: 'l4',
+  l7: 'l7',
+});
+
 const LAYOUT_MODES = Object.freeze({
   default: 'default',
   k8sNode: 'k8sNode',
@@ -306,13 +311,47 @@ function cloneProtocolMix(protocolMix) {
   return Object.keys(copied).length > 0 ? copied : undefined;
 }
 
-function createEmptyGraph() {
-  return { nodes: [], links: [] };
+function cloneL7Details(l7) {
+  if (!l7 || typeof l7 !== 'object') {
+    return undefined;
+  }
+
+  const cloned = {
+    requestCount: Number.isFinite(Number(l7.requestCount)) ? Number(l7.requestCount) : 0,
+    responseCount: Number.isFinite(Number(l7.responseCount)) ? Number(l7.responseCount) : 0,
+  };
+
+  if (l7.http && typeof l7.http === 'object') {
+    cloned.http = {};
+    const statusClassMix = cloneProtocolMix(l7.http.statusClassMix);
+    const methodMix = cloneProtocolMix(l7.http.methodMix);
+    if (statusClassMix) {
+      cloned.http.statusClassMix = statusClassMix;
+    }
+    if (methodMix) {
+      cloned.http.methodMix = methodMix;
+    }
+    if (Number.isFinite(Number(l7.http.p50LatencyMs))) {
+      cloned.http.p50LatencyMs = Number(l7.http.p50LatencyMs);
+    }
+    if (Number.isFinite(Number(l7.http.p95LatencyMs))) {
+      cloned.http.p95LatencyMs = Number(l7.http.p95LatencyMs);
+    }
+    if (Object.keys(cloned.http).length === 0) {
+      delete cloned.http;
+    }
+  }
+
+  return cloned;
 }
 
-function createInitialModeState() {
+function createEmptyGraph(trafficLayer = TRAFFIC_LAYERS.l4) {
+  return { nodes: [], links: [], trafficLayer };
+}
+
+function createInitialModeState(trafficLayer = TRAFFIC_LAYERS.l4) {
   return {
-    graphData: createEmptyGraph(),
+    graphData: createEmptyGraph(trafficLayer),
     connected: false,
     truncation: null,
     layoutMode: LAYOUT_MODES.default,
@@ -330,6 +369,20 @@ function createInitialAllModeState() {
 
 function resolveViewMode(viewMode) {
   return viewMode === VIEW_MODES.pod ? VIEW_MODES.pod : VIEW_MODES.service;
+}
+
+function resolveTrafficLayer(trafficLayer) {
+  return trafficLayer === TRAFFIC_LAYERS.l7 ? TRAFFIC_LAYERS.l7 : TRAFFIC_LAYERS.l4;
+}
+
+function buildFlowStreamPath(namespace, viewMode, trafficLayer) {
+  const search = new URLSearchParams();
+  search.set('view', resolveViewMode(viewMode));
+  search.set('layer', resolveTrafficLayer(trafficLayer));
+  if (namespace) {
+    search.set('namespace', namespace);
+  }
+  return `/api/flows?${search.toString()}`;
 }
 
 function storageKeyForMode(mode) {
@@ -770,6 +823,7 @@ function mergeGraphUpdate(prevGraphData, incomingGraph, nodePositions, draggingN
     existingLink.protocol = patch.protocol;
     existingLink.protocolMix = cloneProtocolMix(patch.protocolMix);
     existingLink.verdict = patch.verdict;
+    existingLink.l7 = cloneL7Details(patch.l7);
     nextLinks.push(existingLink);
     incomingLinkByKey.delete(key);
   }
@@ -778,6 +832,7 @@ function mergeGraphUpdate(prevGraphData, incomingGraph, nodePositions, draggingN
     nextLinks.push({
       ...patch,
       protocolMix: cloneProtocolMix(patch.protocolMix),
+      l7: cloneL7Details(patch.l7),
     });
   }
 
@@ -849,8 +904,13 @@ function normalizeTruncation(truncation) {
   };
 }
 
-export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
+export function useFlowStream(
+  namespace,
+  activeViewMode = VIEW_MODES.service,
+  activeTrafficLayer = TRAFFIC_LAYERS.l4,
+) {
   const resolvedActiveMode = resolveViewMode(activeViewMode);
+  const resolvedActiveLayer = resolveTrafficLayer(activeTrafficLayer);
   const [modeState, setModeState] = useState(createInitialAllModeState);
   const sourcesRef = useRef({
     [VIEW_MODES.service]: null,
@@ -872,7 +932,7 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
     const mode = resolvedActiveMode;
     draggingNodeIdsRef.current[mode].add(nodeId);
     nodePositionsRef.current[mode].set(nodeId, { x, y });
-  }, [resolvedActiveMode]);
+  }, []);
 
   const persistNodePosition = useCallback((nodeId, x, y) => {
     const mode = resolvedActiveMode;
@@ -920,7 +980,7 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
         },
       };
     });
-  }, [resolvedActiveMode]);
+  }, []);
 
   const resetLayout = useCallback(() => {
     const mode = resolvedActiveMode;
@@ -962,10 +1022,7 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
   }, [resolvedActiveMode]);
 
   const groupByK8sNode = useCallback(() => {
-    const mode = resolvedActiveMode;
-    if (mode !== VIEW_MODES.pod) {
-      return;
-    }
+    const mode = VIEW_MODES.pod;
 
     draggingNodeIdsRef.current[mode].clear();
     nodePositionsRef.current[mode].clear();
@@ -1013,19 +1070,23 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
     setModeState((prev) => {
       let next = prev;
       for (const mode of MODES) {
-        next = updateModeConnected(next, mode, false);
+        next = {
+          ...updateModeConnected(next, mode, false),
+          [mode]: {
+            ...(next[mode] || createInitialModeState(resolvedActiveLayer)),
+            connected: false,
+            graphData: {
+              ...(next[mode]?.graphData || createEmptyGraph(resolvedActiveLayer)),
+              trafficLayer: resolvedActiveLayer,
+            },
+          },
+        };
       }
       return next;
     });
 
     for (const mode of MODES) {
-      const search = new URLSearchParams();
-      search.set('view', mode);
-      if (namespace) {
-        search.set('namespace', namespace);
-      }
-
-      const source = new EventSource(`/api/flows?${search.toString()}`);
+      const source = new EventSource(buildFlowStreamPath(namespace, mode, resolvedActiveLayer));
       sourcesRef.current[mode] = source;
 
       source.onopen = () => {
@@ -1064,7 +1125,10 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
               ...prev,
               [mode]: {
                 ...currentModeState,
-                graphData,
+                graphData: {
+                  ...graphData,
+                  trafficLayer: resolveTrafficLayer(incoming?.trafficLayer),
+                },
                 truncation: normalizeTruncation(incoming?.truncation),
                 nodeGroupBoxes,
                 k8sNodes,
@@ -1090,16 +1154,19 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
         }
       }
     };
-  }, [namespace]);
+  }, [namespace, resolvedActiveLayer]);
 
-  const activeModeState = modeState[resolvedActiveMode] || createInitialModeState();
+  const activeModeState = modeState[resolvedActiveMode] || createInitialModeState(resolvedActiveLayer);
+  const podModeState = modeState[VIEW_MODES.pod] || createInitialModeState(resolvedActiveLayer);
 
   return {
     graphData: activeModeState.graphData,
+    trafficLayer: activeModeState.graphData.trafficLayer || resolvedActiveLayer,
     connected: activeModeState.connected,
     truncation: activeModeState.truncation,
     layoutMode: activeModeState.layoutMode,
     nodeGroupBoxes: activeModeState.nodeGroupBoxes,
+    podNodeCount: podModeState.graphData.nodes.length,
     trackNodePosition,
     persistNodePosition,
     resetLayout,
@@ -1108,6 +1175,8 @@ export function useFlowStream(namespace, activeViewMode = VIEW_MODES.service) {
 }
 
 export const __TEST_ONLY__ = {
+  TRAFFIC_LAYERS,
+  buildFlowStreamPath,
   nodeRadius,
   setNodeFixedPosition,
   resolveDraggedNodeOverlap,

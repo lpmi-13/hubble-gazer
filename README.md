@@ -14,6 +14,7 @@ This is what runs locally when you run with `make dev` (it has sample data)
 - Aggregates flows into a rolling service graph
 - Streams graph updates to browser clients via SSE
 - Serves a React UI that visualizes live graph traffic
+- Switches between `Network (L4)` and `Application (L7)` views without mixing transport and application semantics
 
 ## Configuration
 - `FLOW_SOURCE` (`hubble` or `mock`, default: `hubble`)
@@ -39,6 +40,17 @@ Open `http://localhost:5173`.
 ```bash
 HUBBLE_RELAY_ADDR=<relay-host:4245> make dev-live
 ```
+
+L7 mode depends on Cilium/Hubble exposing L7 flow data. When L7 visibility is not enabled, the UI stays functional but the `Application (L7)` view will be empty.
+
+## API Notes
+
+`GET /api/flows` accepts:
+- `view=service|pod`
+- `namespace=<ns>`
+- `layer=l4|l7` (defaults to `l4`)
+
+In pod view with a namespace filter, previously observed pods in that namespace remain visible even when they are currently idle. This visibility comes from pods already seen in Hubble flows; the app does not query the Kubernetes API for pod inventory.
 
 ### Additional commands
 

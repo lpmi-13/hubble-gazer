@@ -1,7 +1,6 @@
 import React, { useRef, useCallback, useEffect, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import {
-  PROTOCOL_LEGEND,
   edgeWidth,
   errorRatio,
   particleColor,
@@ -9,6 +8,7 @@ import {
   particleSpeed,
   protocolColor,
   protocolDistribution,
+  protocolLegend,
   trafficParticleCount,
 } from './graphEncoding';
 
@@ -34,6 +34,16 @@ const NODE_GROUP_STROKE = 'rgba(110, 194, 242, 0.36)';
 const NODE_GROUP_FILL = 'rgba(28, 77, 110, 0.14)';
 const NODE_GROUP_LABEL_BG = 'rgba(22, 62, 90, 0.74)';
 const NODE_GROUP_LABEL_TEXT = '#cdeeff';
+const TOUCH_LABEL_WIDTH_PER_CHAR = 7.2;
+const TOUCH_LABEL_MIN_WIDTH = 44;
+const TOUCH_LABEL_MAX_WIDTH = 168;
+const TOUCH_LABEL_HEIGHT = 18;
+const TOUCH_LABEL_PADDING_X = 10;
+const TOUCH_LABEL_GAP = 6;
+const INITIAL_VIEW_FIT_DURATION_MS = 720;
+const INITIAL_VIEW_SETTLE_DELAY_MS = 280;
+const INITIAL_VIEW_SETTLE_DURATION_MS = 420;
+const INITIAL_VIEW_MAX_WAIT_FRAMES = 24;
 
 function isCoarsePointer() {
   return typeof window !== 'undefined'
@@ -47,6 +57,10 @@ function getNodeRadius() {
 
 function getNodeColor(node) {
   return NAMESPACE_COLORS[node.namespace] || DEFAULT_COLOR;
+}
+
+function nodeLabel(node) {
+  return node?.label || node?.id || '';
 }
 
 function nodeGroupKey(node) {
@@ -101,6 +115,44 @@ function getLinkEndpoints(link) {
   };
 }
 
+function toCanvasPoint(clientX, clientY, rect) {
+  return {
+    x: clientX - rect.left,
+    y: clientY - rect.top,
+  };
+}
+
+function pointInBox(x, y, box) {
+  return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+}
+
+function touchLabelBox(node, pagePoint, zoom) {
+  const label = nodeLabel(node);
+  const width = Math.max(
+    TOUCH_LABEL_MIN_WIDTH,
+    Math.min(TOUCH_LABEL_MAX_WIDTH, label.length * TOUCH_LABEL_WIDTH_PER_CHAR),
+  );
+  const nodeRadiusPx = getNodeRadius(node) * zoom;
+  const top = pagePoint.y + Math.max(TOUCH_LABEL_GAP, nodeRadiusPx + 4);
+  return {
+    left: pagePoint.x - (width / 2) - TOUCH_LABEL_PADDING_X,
+    right: pagePoint.x + (width / 2) + TOUCH_LABEL_PADDING_X,
+    top,
+    bottom: top + TOUCH_LABEL_HEIGHT,
+  };
+}
+
+function isPositionedNode(node) {
+  return Number.isFinite(node?.x) && Number.isFinite(node?.y);
+}
+
+function autoFitPadding(dimensions) {
+  const shortestSide = Math.max(0, Math.min(dimensions.width, dimensions.height));
+  const coarsePadding = shortestSide * 0.18;
+  const finePadding = shortestSide * 0.12;
+  return Math.round(Math.max(isCoarsePointer() ? 52 : 72, isCoarsePointer() ? coarsePadding : finePadding));
+}
+
 function controlPointForCurve(source, target, curvature) {
   const dx = target.x - source.x;
   const dy = target.y - source.y;
@@ -142,7 +194,7 @@ function drawCurveSegment(ctx, start, control, end, t0, t1) {
   ctx.stroke();
 }
 
-function drawParticlesOnCurve(ctx, start, control, end, link, nowMs) {
+function drawParticlesOnCurve(ctx, start, control, end, link, nowMs, trafficLayer) {
   const count = trafficParticleCount(link);
   if (count <= 0) {
     return;
@@ -151,7 +203,7 @@ function drawParticlesOnCurve(ctx, start, control, end, link, nowMs) {
   const speed = particleSpeed(link);
   const offset = ((nowMs / 1000) * speed) % 1;
   const radius = particleRadius(link);
-  const color = particleColor(link);
+  const color = particleColor(link, trafficLayer);
   const span = 1 - (EDGE_PARTICLE_PADDING * 2);
 
   ctx.fillStyle = color;
@@ -174,8 +226,10 @@ function drawParticlesOnCurve(ctx, start, control, end, link, nowMs) {
 
 export default function NetworkGraph({
   data,
+  trafficLayer = 'l4',
   groupingMode = '',
   nodeGroupBoxes = [],
+  viewportResetKey = 'default',
   onLinkClick,
   onNodeDrag,
   onNodePositionChange,
@@ -184,8 +238,10 @@ export default function NetworkGraph({
   const containerRef = useRef();
   const graphNodesRef = useRef([]);
   const draggingNodeIdRef = useRef(null);
+  const touchDragRef = useRef(null);
   const groupingModeRef = useRef(groupingMode);
   const groupBoxesByKeyRef = useRef(new Map());
+  const lastAutoFitKeyRef = useRef('');
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [hasReceivedData, setHasReceivedData] = useState(false);
@@ -345,6 +401,67 @@ export default function NetworkGraph({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    if (!viewportResetKey || dimensions.width <= 0 || dimensions.height <= 0 || data.nodes.length === 0) {
+      return undefined;
+    }
+    if (lastAutoFitKeyRef.current === viewportResetKey) {
+      return undefined;
+    }
+
+    let frameCount = 0;
+    let rafId = 0;
+    let settleTimeout = 0;
+    let cancelled = false;
+    const padding = autoFitPadding(dimensions);
+    const fitNodeFilter = (node) => isPositionedNode(node);
+
+    const runAutoFit = () => {
+      if (cancelled) {
+        return;
+      }
+
+      const graph = graphRef.current;
+      const nodes = graphNodesRef.current;
+      if (!graph || nodes.length === 0) {
+        rafId = window.requestAnimationFrame(runAutoFit);
+        return;
+      }
+
+      const positionedNodeCount = nodes.filter(isPositionedNode).length;
+      if (positionedNodeCount === 0) {
+        rafId = window.requestAnimationFrame(runAutoFit);
+        return;
+      }
+
+      if (positionedNodeCount < nodes.length && frameCount < INITIAL_VIEW_MAX_WAIT_FRAMES) {
+        frameCount += 1;
+        rafId = window.requestAnimationFrame(runAutoFit);
+        return;
+      }
+
+      lastAutoFitKeyRef.current = viewportResetKey;
+      graph.zoomToFit(INITIAL_VIEW_FIT_DURATION_MS, padding, fitNodeFilter);
+      settleTimeout = window.setTimeout(() => {
+        if (cancelled || lastAutoFitKeyRef.current !== viewportResetKey) {
+          return;
+        }
+        graph.zoomToFit(INITIAL_VIEW_SETTLE_DURATION_MS, padding, fitNodeFilter);
+      }, INITIAL_VIEW_SETTLE_DELAY_MS);
+    };
+
+    rafId = window.requestAnimationFrame(runAutoFit);
+    return () => {
+      cancelled = true;
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+      }
+      if (settleTimeout) {
+        window.clearTimeout(settleTimeout);
+      }
+    };
+  }, [data.nodes.length, dimensions.height, dimensions.width, viewportResetKey]);
+
   const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
     const label = node.label || node.id;
     const fontSize = Math.max(12 / globalScale, 3);
@@ -426,6 +543,174 @@ export default function NetworkGraph({
     }
   }, [onNodePositionChange]);
 
+  const findTouchNode = useCallback((clientX, clientY) => {
+    const graph = graphRef.current;
+    const container = containerRef.current;
+    if (!graph || !container) {
+      return null;
+    }
+
+    const rect = container.getBoundingClientRect();
+    const zoom = Math.max(graph.zoom?.() || 1, 0.001);
+    let bestMatch = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    for (const node of graphNodesRef.current) {
+      if (!node || !Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+        continue;
+      }
+
+      const canvasPoint = graph.graph2ScreenCoords(node.x, node.y);
+      const pagePoint = {
+        x: rect.left + canvasPoint.x,
+        y: rect.top + canvasPoint.y,
+      };
+      const distance = Math.hypot(clientX - pagePoint.x, clientY - pagePoint.y);
+      const nodeRadiusPx = Math.max(MIN_POINTER_RADIUS_COARSE, (getNodeRadius(node) + 5) * zoom);
+
+      if (distance <= nodeRadiusPx && distance < bestScore) {
+        bestMatch = node;
+        bestScore = distance;
+        continue;
+      }
+
+      if (!pointInBox(clientX, clientY, touchLabelBox(node, pagePoint, zoom))) {
+        continue;
+      }
+
+      const labelScore = distance * 0.5;
+      if (labelScore < bestScore) {
+        bestMatch = node;
+        bestScore = labelScore;
+      }
+    }
+
+    return bestMatch;
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return undefined;
+    }
+
+    const handleTouchStart = (event) => {
+      if (event.touches.length !== 1 || touchDragRef.current) {
+        return;
+      }
+
+      const touch = event.touches[0];
+      const node = findTouchNode(touch.clientX, touch.clientY);
+      if (!node) {
+        return;
+      }
+
+      const graph = graphRef.current;
+      const rect = container.getBoundingClientRect();
+      if (!graph) {
+        return;
+      }
+
+      const touchPoint = toCanvasPoint(touch.clientX, touch.clientY, rect);
+      const graphPoint = graph.screen2GraphCoords(touchPoint.x, touchPoint.y);
+      if (!Number.isFinite(graphPoint?.x) || !Number.isFinite(graphPoint?.y)) {
+        return;
+      }
+
+      touchDragRef.current = {
+        identifier: touch.identifier,
+        node,
+        offsetX: node.x - graphPoint.x,
+        offsetY: node.y - graphPoint.y,
+      };
+
+      handleNodeDrag(node);
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    const handleTouchMove = (event) => {
+      const dragState = touchDragRef.current;
+      if (!dragState) {
+        return;
+      }
+
+      const touch = Array.from(event.touches).find((item) => item.identifier === dragState.identifier);
+      if (!touch) {
+        return;
+      }
+
+      const graph = graphRef.current;
+      if (!graph) {
+        return;
+      }
+
+      const rect = container.getBoundingClientRect();
+      const touchPoint = toCanvasPoint(touch.clientX, touch.clientY, rect);
+      const graphPoint = graph.screen2GraphCoords(touchPoint.x, touchPoint.y);
+      if (!Number.isFinite(graphPoint?.x) || !Number.isFinite(graphPoint?.y)) {
+        return;
+      }
+
+      let nextX = graphPoint.x + dragState.offsetX;
+      let nextY = graphPoint.y + dragState.offsetY;
+      if (groupingModeRef.current === NODE_GROUP_MODE) {
+        const clamped = clampToGroupBox(dragState.node, nextX, nextY, groupBoxesByKeyRef.current);
+        nextX = clamped.x;
+        nextY = clamped.y;
+      }
+
+      const node = dragState.node;
+      node.x = nextX;
+      node.y = nextY;
+      node.fx = nextX;
+      node.fy = nextY;
+      node.vx = 0;
+      node.vy = 0;
+      node.layoutTargetX = nextX;
+      node.layoutTargetY = nextY;
+
+      if (onNodeDrag) {
+        onNodeDrag(node.id, nextX, nextY);
+      }
+      graph.refresh?.();
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    const finishTouchDrag = (event) => {
+      const dragState = touchDragRef.current;
+      if (!dragState) {
+        return;
+      }
+
+      const changedTouches = Array.from(event.changedTouches || []);
+      const isMatchingTouch = event.type === 'touchcancel'
+        || changedTouches.some((touch) => touch.identifier === dragState.identifier);
+      if (!isMatchingTouch) {
+        return;
+      }
+
+      touchDragRef.current = null;
+      handleNodeDragEnd(dragState.node);
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    container.addEventListener('touchstart', handleTouchStart, { passive: false, capture: true });
+    window.addEventListener('touchmove', handleTouchMove, { passive: false, capture: true });
+    window.addEventListener('touchend', finishTouchDrag, { passive: false, capture: true });
+    window.addEventListener('touchcancel', finishTouchDrag, { passive: false, capture: true });
+
+    return () => {
+      touchDragRef.current = null;
+      container.removeEventListener('touchstart', handleTouchStart, true);
+      window.removeEventListener('touchmove', handleTouchMove, true);
+      window.removeEventListener('touchend', finishTouchDrag, true);
+      window.removeEventListener('touchcancel', finishTouchDrag, true);
+    };
+  }, [findTouchNode, handleNodeDrag, handleNodeDragEnd, onNodeDrag]);
+
   const renderFramePre = useCallback((ctx, globalScale) => {
     if (groupingMode !== NODE_GROUP_MODE || !Array.isArray(nodeGroupBoxes) || nodeGroupBoxes.length === 0) {
       return;
@@ -498,7 +783,7 @@ export default function NetworkGraph({
     const { source, target } = endpoints;
     const width = edgeWidth(link);
     const control = controlPointForCurve(source, target, EDGE_CURVATURE);
-    const distribution = protocolDistribution(link);
+    const distribution = protocolDistribution(link, trafficLayer);
     const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
     ctx.save();
@@ -514,13 +799,13 @@ export default function NetworkGraph({
         continue;
       }
 
-      ctx.strokeStyle = protocolColor(segment.protocol);
+      ctx.strokeStyle = protocolColor(segment.protocol, trafficLayer);
       ctx.lineWidth = width;
       drawCurveSegment(ctx, source, control, target, startT, endT);
       startT = endT;
     }
 
-    const dropRatio = errorRatio(link);
+    const dropRatio = errorRatio(link, trafficLayer);
     if (dropRatio > 0.001) {
       ctx.strokeStyle = `rgba(248, 81, 73, ${0.24 + (dropRatio * 0.5)})`;
       ctx.lineWidth = Math.max(1, width * 0.38);
@@ -529,13 +814,25 @@ export default function NetworkGraph({
       ctx.setLineDash([]);
     }
 
-    drawParticlesOnCurve(ctx, source, control, target, link, nowMs);
+    drawParticlesOnCurve(ctx, source, control, target, link, nowMs, trafficLayer);
 
     ctx.restore();
-  }, []);
+  }, [trafficLayer]);
 
   const showLoading = !hasReceivedData && data.nodes.length === 0;
   const showEmpty = hasReceivedData && data.nodes.length === 0;
+  const showNoL7Notice = trafficLayer === 'l7' && hasReceivedData && data.nodes.length > 0 && data.links.length === 0;
+  const legendRows = trafficLayer === 'l7'
+    ? [
+      'More particles = more L7 events',
+      'Particle motion = request direction',
+      'Red dashed overlay = high HTTP 5xx ratio',
+    ]
+    : [
+      'More particles = more traffic',
+      'Particle motion = flow direction',
+      'Red dashed overlay = dropped traffic',
+    ];
 
   return (
     <div
@@ -573,29 +870,35 @@ export default function NetworkGraph({
         <p className="graph-legend-title">Legend</p>
         <div className="graph-legend-row">
           <span className="graph-legend-swatch graph-legend-swatch-traffic" />
-          More particles = more traffic
+          {legendRows[0]}
         </div>
         <div className="graph-legend-row">
           <span className="graph-legend-swatch graph-legend-swatch-particle" />
-          Particle motion = flow direction
+          {legendRows[1]}
         </div>
         <div className="graph-legend-row">
           <span className="graph-legend-swatch graph-legend-swatch-drop" />
-          Red dashed overlay = dropped traffic
+          {legendRows[2]}
         </div>
         <div className="graph-legend-row graph-legend-row-protocols">
           <span className="graph-legend-swatch graph-legend-swatch-mixed" />
           Protocol colors:
           <div className="graph-legend-protocol-list">
-            {PROTOCOL_LEGEND.map((item) => (
+            {protocolLegend(trafficLayer).map((item) => (
               <span className="graph-legend-protocol-item" key={item.protocol}>
                 <span className="graph-legend-protocol-dot" style={{ backgroundColor: item.color }} />
-                {item.protocol}
+                {item.label || item.protocol}
               </span>
             ))}
           </div>
         </div>
       </aside>
+      {showNoL7Notice && (
+        <div className="graph-inline-notice" role="status" aria-live="polite">
+          <div className="graph-inline-notice-title">No L7 traffic detected for current filters.</div>
+          <div className="graph-inline-notice-text">L7 visibility must be enabled in Cilium/Hubble for application traffic to appear.</div>
+        </div>
+      )}
       {showLoading && (
         <div className="graph-overlay" aria-live="polite">
           <div className="graph-loading">
@@ -608,8 +911,12 @@ export default function NetworkGraph({
         <div className="graph-overlay" aria-live="polite">
           <div className="graph-empty">
             <div className="graph-empty-icon" aria-hidden="true">&#8728;</div>
-            <div className="graph-empty-text">No network flows detected</div>
-            <div className="graph-empty-hint">Flows will appear when traffic is observed</div>
+            <div className="graph-empty-text">{trafficLayer === 'l7' ? 'No L7 traffic detected for current filters.' : 'No network flows detected'}</div>
+            <div className="graph-empty-hint">
+              {trafficLayer === 'l7'
+                ? 'L7 visibility must be enabled in Cilium/Hubble for application traffic to appear.'
+                : 'Flows will appear when traffic is observed'}
+            </div>
           </div>
         </div>
       )}

@@ -79,6 +79,15 @@ func main() {
 			http.Error(w, "invalid view mode", http.StatusBadRequest)
 			return
 		}
+		rawLayer := r.URL.Query().Get("layer")
+		if rawLayer == "" {
+			rawLayer = string(graph.TrafficLayerL4)
+		}
+		trafficLayer, ok := graph.ParseTrafficLayer(rawLayer)
+		if !ok {
+			http.Error(w, "invalid traffic layer", http.StatusBadRequest)
+			return
+		}
 
 		if activeSSE.Add(1) > maxSSEConnections {
 			activeSSE.Add(-1)
@@ -101,9 +110,10 @@ func main() {
 		defer ticker.Stop()
 
 		sendGraph(w, flusher, aggregator, graph.SnapshotOptions{
-			Namespace:   namespace,
-			ViewMode:    viewMode,
-			PodMaxNodes: podViewMaxNodes,
+			Namespace:    namespace,
+			ViewMode:     viewMode,
+			TrafficLayer: trafficLayer,
+			PodMaxNodes:  podViewMaxNodes,
 		})
 
 		for {
@@ -112,9 +122,10 @@ func main() {
 				return
 			case <-ticker.C:
 				sendGraph(w, flusher, aggregator, graph.SnapshotOptions{
-					Namespace:   namespace,
-					ViewMode:    viewMode,
-					PodMaxNodes: podViewMaxNodes,
+					Namespace:    namespace,
+					ViewMode:     viewMode,
+					TrafficLayer: trafficLayer,
+					PodMaxNodes:  podViewMaxNodes,
 				})
 			}
 		}
