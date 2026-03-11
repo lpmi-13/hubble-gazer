@@ -157,6 +157,10 @@ body {
   color: var(--error);
 }
 
+.stat-pill-warn .stat-pill-value {
+  color: var(--warn);
+}
+
 .header-controls {
   justify-self: end;
   display: flex;
@@ -363,11 +367,16 @@ body {
   animation: fadeInUp var(--timing-slow) var(--easing-standard) 90ms both;
 }
 
-.graph-truncation-notice {
+.graph-notices {
   position: absolute;
   right: 16px;
   bottom: 16px;
   max-width: min(70%, 560px);
+  display: grid;
+  gap: 8px;
+}
+
+.graph-truncation-notice {
   padding: 8px 11px;
   font-size: 12px;
   color: var(--warn);
@@ -470,6 +479,11 @@ body {
       rgba(248, 81, 73, 0.85) 0 6px,
       rgba(248, 81, 73, 0) 6px 11px
     );
+}
+
+.graph-legend-swatch-node-state {
+  background:
+    linear-gradient(90deg, rgba(255, 209, 102, 0.92) 0 33%, rgba(255, 123, 114, 0.9) 33% 100%);
 }
 
 .graph-legend-swatch-mixed {
@@ -1081,11 +1095,16 @@ body {
     display: none;
   }
 
-  .graph-truncation-notice {
+  .graph-notices {
     left: 10px;
     right: 10px;
     bottom: 10px;
     max-width: none;
+  }
+
+  .graph-truncation-notice {
+    left: 10px;
+    right: 10px;
     font-size: 11px;
     padding: 7px 9px;
   }

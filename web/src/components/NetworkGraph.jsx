@@ -19,6 +19,15 @@ const NAMESPACE_COLORS = {
 };
 
 const DEFAULT_COLOR = '#8b949e';
+const TERMINATED_STROKE = '#ff7b72';
+const TERMINATED_FILL = 'rgba(255, 123, 114, 0.16)';
+const TERMINATED_GLOW = 'rgba(255, 123, 114, 0.24)';
+const UNRESOLVED_STROKE = '#ffd166';
+const UNRESOLVED_FILL = 'rgba(255, 209, 102, 0.16)';
+const UNRESOLVED_GLOW = 'rgba(255, 209, 102, 0.22)';
+const EXTERNAL_STROKE = '#79c0ff';
+const EXTERNAL_FILL = 'rgba(121, 192, 255, 0.16)';
+const EXTERNAL_GLOW = 'rgba(121, 192, 255, 0.22)';
 
 const NODE_RADIUS = 10;
 const MIN_POINTER_RADIUS = 24;
@@ -57,6 +66,42 @@ function getNodeRadius() {
 
 function getNodeColor(node) {
   return NAMESPACE_COLORS[node.namespace] || DEFAULT_COLOR;
+}
+
+function nodeKind(node) {
+  const value = typeof node?.kind === 'string' ? node.kind : '';
+  return value.length > 0 ? value : 'pod';
+}
+
+function nodeLifecycle(node) {
+  const value = typeof node?.lifecycle === 'string' ? node.lifecycle : '';
+  if (value === 'terminated' || value === 'unresolved') {
+    return value;
+  }
+  return 'live';
+}
+
+function colorWithAlpha(hex, alpha) {
+  if (typeof hex !== 'string' || !hex.startsWith('#') || (hex.length !== 7 && hex.length !== 4)) {
+    return hex;
+  }
+
+  const full = hex.length === 4
+    ? `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`
+    : hex;
+  const r = parseInt(full.slice(1, 3), 16);
+  const g = parseInt(full.slice(3, 5), 16);
+  const b = parseInt(full.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function diamondPath(ctx, x, y, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x, y - radius);
+  ctx.lineTo(x + radius, y);
+  ctx.lineTo(x, y + radius);
+  ctx.lineTo(x - radius, y);
+  ctx.closePath();
 }
 
 function nodeLabel(node) {
@@ -467,27 +512,70 @@ export default function NetworkGraph({
     const fontSize = Math.max(12 / globalScale, 3);
     const nodeSize = getNodeRadius(node);
     const color = getNodeColor(node);
+    const kind = nodeKind(node);
+    const lifecycle = nodeLifecycle(node);
+    const isTerminated = lifecycle === 'terminated';
+    const isUnresolved = kind === 'unresolved';
+    const isExternal = kind === 'external';
 
-    // Draw node circle
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, nodeSize, 0, 2 * Math.PI);
-    ctx.fillStyle = color;
-    ctx.fill();
+    if (isUnresolved) {
+      diamondPath(ctx, node.x, node.y, nodeSize + 1);
+      ctx.fillStyle = UNRESOLVED_FILL;
+      ctx.fill();
+      ctx.strokeStyle = UNRESOLVED_STROKE;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
 
-    // Draw glow
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, nodeSize + 2, 0, 2 * Math.PI);
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.3;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+      diamondPath(ctx, node.x, node.y, nodeSize + 4);
+      ctx.strokeStyle = UNRESOLVED_GLOW;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    } else if (isExternal) {
+      roundedRectPath(ctx, node.x - nodeSize, node.y - nodeSize, nodeSize * 2, nodeSize * 2, 4);
+      ctx.fillStyle = EXTERNAL_FILL;
+      ctx.fill();
+      ctx.strokeStyle = EXTERNAL_STROKE;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+
+      roundedRectPath(ctx, node.x - (nodeSize + 3), node.y - (nodeSize + 3), (nodeSize + 3) * 2, (nodeSize + 3) * 2, 6);
+      ctx.strokeStyle = EXTERNAL_GLOW;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, nodeSize, 0, 2 * Math.PI);
+      ctx.fillStyle = isTerminated ? colorWithAlpha(color, 0.24) : color;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, nodeSize + 2, 0, 2 * Math.PI);
+      ctx.strokeStyle = isTerminated ? TERMINATED_GLOW : colorWithAlpha(color, 0.3);
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, nodeSize, 0, 2 * Math.PI);
+      ctx.strokeStyle = isTerminated ? TERMINATED_STROKE : color;
+      ctx.lineWidth = isTerminated ? 1.8 : 1.2;
+      if (isTerminated) {
+        ctx.setLineDash([4 / Math.max(globalScale, 0.001), 3 / Math.max(globalScale, 0.001)]);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     // Draw label
     ctx.font = `${fontSize}px "IBM Plex Sans", "Space Grotesk", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillStyle = '#dbf2ff';
+    ctx.fillStyle = isTerminated
+      ? '#ffd6d1'
+      : isUnresolved
+        ? '#ffe8b5'
+        : isExternal
+          ? '#d5ebff'
+          : '#dbf2ff';
     ctx.fillText(label, node.x, node.y + nodeSize + 3);
   }, []);
 
@@ -822,6 +910,7 @@ export default function NetworkGraph({
   const showLoading = !hasReceivedData && data.nodes.length === 0;
   const showEmpty = hasReceivedData && data.nodes.length === 0;
   const showNoL7Notice = trafficLayer === 'l7' && hasReceivedData && data.nodes.length > 0 && data.links.length === 0;
+  const showNodeStateLegend = data.nodes.some((node) => node?.lifecycle || node?.kind);
   const legendRows = trafficLayer === 'l7'
     ? [
       'More particles = more L7 events',
@@ -880,6 +969,12 @@ export default function NetworkGraph({
           <span className="graph-legend-swatch graph-legend-swatch-drop" />
           {legendRows[2]}
         </div>
+        {showNodeStateLegend && (
+          <div className="graph-legend-row">
+            <span className="graph-legend-swatch graph-legend-swatch-node-state" />
+            Solid circles = live pods, red-ring circles = terminated pods, amber diamonds = unresolved endpoints
+          </div>
+        )}
         <div className="graph-legend-row graph-legend-row-protocols">
           <span className="graph-legend-swatch graph-legend-swatch-mixed" />
           Protocol colors:

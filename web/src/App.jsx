@@ -159,18 +159,28 @@ export default function App() {
   const canResetLayout = graphData.nodes.length > 0;
   const isPodMode = viewMode === VIEW_MODES.pod;
   const isNodeGroupMode = isPodMode && layoutMode === 'k8sNode';
+  const podSummary = isPodMode && graphData.podSummary
+    ? graphData.podSummary
+    : { liveNodes: 0, terminatedNodes: 0, unresolvedNodes: 0, unresolvedFlows: 0 };
   const canGroupByNode = podNodeCount > 0;
   const viewportResetKey = `${viewMode}:${namespace || 'all'}:${layoutMode || 'default'}`;
   const graphHint = isPodMode
     ? (isNodeGroupMode
-      ? 'Node-group mode active: pods are constrained inside worker-node boundaries.'
-      : 'Pod view keeps pods visible for the selected namespace; use Group by Node to cluster replicas by worker.')
+      ? 'Node-group mode active: live pods use Kubernetes node placement, terminated pods stay on their last observed worker, and unresolved endpoints stay in the unknown bucket.'
+      : 'Pod view distinguishes live pods, terminated pods still inside the 30 second flow window, and unresolved endpoints where Hubble omitted the pod name.')
     : (trafficLayer === TRAFFIC_LAYERS.l7
       ? 'Application mode shows L7 request and response events; HTTP details appear when available.'
       : 'Drag nodes to pin placement while telemetry continues streaming.');
   const truncationNotice = isPodMode && truncation
     ? `Showing top ${truncation.limit} pods by traffic (${truncation.shownNodes}/${truncation.totalNodes}).`
     : null;
+  const terminatedNotice = isPodMode && podSummary.terminatedNodes > 0
+    ? `Showing ${podSummary.terminatedNodes} terminated pod${podSummary.terminatedNodes === 1 ? '' : 's'} that still have traffic inside the 30 second window.`
+    : null;
+  const unresolvedNotice = isPodMode && podSummary.unresolvedNodes > 0
+    ? `Showing ${podSummary.unresolvedNodes} unresolved endpoint bucket${podSummary.unresolvedNodes === 1 ? '' : 's'} from ${podSummary.unresolvedFlows} recent flow${podSummary.unresolvedFlows === 1 ? '' : 's'} where Hubble did not report a pod name.`
+    : null;
+  const graphNotices = [truncationNotice, terminatedNotice, unresolvedNotice].filter(Boolean);
   const alertLabel = trafficLayer === TRAFFIC_LAYERS.l7 ? 'HTTP 5xx' : 'Dropped';
 
   return (
@@ -203,6 +213,18 @@ export default function App() {
             <span className="stat-pill-label">{alertLabel}</span>
             <span className="stat-pill-value">{totals.alertEdges}</span>
           </div>
+          {isPodMode && podSummary.terminatedNodes > 0 && (
+            <div className="stat-pill stat-pill-warn">
+              <span className="stat-pill-label">Terminated</span>
+              <span className="stat-pill-value">{podSummary.terminatedNodes}</span>
+            </div>
+          )}
+          {isPodMode && podSummary.unresolvedNodes > 0 && (
+            <div className="stat-pill stat-pill-warn">
+              <span className="stat-pill-label">Unresolved</span>
+              <span className="stat-pill-value">{podSummary.unresolvedNodes}</span>
+            </div>
+          )}
         </div>
         <div className="header-controls">
           <NamespaceSelector value={namespace} onChange={handleNamespaceChange} />
@@ -287,10 +309,14 @@ export default function App() {
             onNodeDrag={handleNodeDrag}
             onNodePositionChange={handleNodePositionChange}
           />
-          {truncationNotice && (
-            <p className="graph-truncation-notice" role="status" aria-live="polite">
-              {truncationNotice}
-            </p>
+          {graphNotices.length > 0 && (
+            <div className="graph-notices" role="status" aria-live="polite">
+              {graphNotices.map((notice) => (
+                <p className="graph-truncation-notice" key={notice}>
+                  {notice}
+                </p>
+              ))}
+            </div>
           )}
           <p className="graph-hint">{graphHint}</p>
         </section>

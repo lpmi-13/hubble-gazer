@@ -50,7 +50,9 @@ L7 mode depends on Cilium/Hubble exposing L7 flow data. When L7 visibility is no
 - `namespace=<ns>`
 - `layer=l4|l7` (defaults to `l4`)
 
-In pod view with a namespace filter, previously observed pods in that namespace remain visible even when they are currently idle. This visibility comes from pods already seen in Hubble flows; the app does not query the Kubernetes API for pod inventory.
+Pod view remains traffic-driven in all scopes. Pods stay visible only while they still have flows inside the active window; terminated pods are shown with a distinct style until those flows expire.
+When Hubble omits a pod name for an endpoint, the UI shows an explicit unresolved endpoint bucket instead of collapsing traffic onto the service name.
+When Kubernetes pod metadata is available, grouped pod placement uses the Kubernetes API (`pod.spec.nodeName`) instead of inferring worker nodes from Hubble observer flows.
 
 ### Additional commands
 

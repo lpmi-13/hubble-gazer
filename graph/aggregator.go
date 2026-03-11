@@ -33,13 +33,31 @@ type SnapshotOptions struct {
 	PodMaxNodes  int
 }
 
+type NodeLifecycle string
+
+const (
+	NodeLifecycleLive       NodeLifecycle = "live"
+	NodeLifecycleTerminated NodeLifecycle = "terminated"
+	NodeLifecycleUnresolved NodeLifecycle = "unresolved"
+)
+
+type NodeKind string
+
+const (
+	NodeKindPod        NodeKind = "pod"
+	NodeKindUnresolved NodeKind = "unresolved"
+	NodeKindExternal   NodeKind = "external"
+)
+
 // Node represents a graph node (service or pod depending on view mode).
 type Node struct {
-	ID        string `json:"id"`
-	Label     string `json:"label"`
-	Namespace string `json:"namespace"`
-	K8sNode   string `json:"k8sNode,omitempty"`
-	Traffic   int    `json:"traffic"` // total incoming flow count
+	ID        string        `json:"id"`
+	Label     string        `json:"label"`
+	Namespace string        `json:"namespace"`
+	K8sNode   string        `json:"k8sNode,omitempty"`
+	Kind      NodeKind      `json:"kind,omitempty"`
+	Lifecycle NodeLifecycle `json:"lifecycle,omitempty"`
+	Traffic   int           `json:"traffic"` // total incoming flow count
 }
 
 // Link represents a connection between services.
@@ -70,12 +88,13 @@ type HTTPDetails struct {
 
 // Graph is the serialized network graph sent to the frontend.
 type Graph struct {
-	Nodes        []Node       `json:"nodes"`
-	Links        []Link       `json:"links"`
-	ViewMode     ViewMode     `json:"viewMode"`
-	TrafficLayer TrafficLayer `json:"trafficLayer"`
-	K8sNodes     []string     `json:"k8sNodes,omitempty"`
-	Truncation   *Truncation  `json:"truncation,omitempty"`
+	Nodes        []Node          `json:"nodes"`
+	Links        []Link          `json:"links"`
+	ViewMode     ViewMode        `json:"viewMode"`
+	TrafficLayer TrafficLayer    `json:"trafficLayer"`
+	K8sNodes     []string        `json:"k8sNodes,omitempty"`
+	Truncation   *Truncation     `json:"truncation,omitempty"`
+	PodSummary   *PodViewSummary `json:"podSummary,omitempty"`
 }
 
 type Truncation struct {
@@ -83,6 +102,13 @@ type Truncation struct {
 	Limit      int    `json:"limit"`
 	TotalNodes int    `json:"totalNodes"`
 	ShownNodes int    `json:"shownNodes"`
+}
+
+type PodViewSummary struct {
+	LiveNodes       int `json:"liveNodes"`
+	TerminatedNodes int `json:"terminatedNodes"`
+	UnresolvedNodes int `json:"unresolvedNodes"`
+	UnresolvedFlows int `json:"unresolvedFlows"`
 }
 
 type flowRecord struct {
@@ -93,8 +119,8 @@ type flowRecord struct {
 	dstService      string
 	srcPod          string
 	dstPod          string
-	nodeName        string
-	direction       flowpb.TrafficDirection
+	srcObservedNode string
+	dstObservedNode string
 	verdict         flowpb.Verdict
 	protocol        string
 	flowType        flowpb.FlowType
@@ -105,13 +131,6 @@ type flowRecord struct {
 	httpStatusClass string
 	httpURL         string
 	latencyNs       uint64
-}
-
-type observedPod struct {
-	ID        string
-	Label     string
-	Namespace string
-	K8sNode   string
 }
 
 type edgeAccumulator struct {
@@ -129,26 +148,28 @@ type edgeAccumulator struct {
 
 // Aggregator collects flows and produces a service graph.
 type Aggregator struct {
-	mu           sync.RWMutex
-	window       time.Duration
-	flows        []flowRecord
-	nsSet        map[string]struct{}
-	nodeSet      map[string]struct{}
-	podCatalog   map[string]observedPod
-	podNodeVotes map[string]map[string]int
-	maxFlows     int
+	mu                sync.RWMutex
+	window            time.Duration
+	flows             []flowRecord
+	nsSet             map[string]struct{}
+	podMetadataSource PodMetadataSource
+	maxFlows          int
 }
 
 // NewAggregator creates a new flow aggregator with the given sliding window duration.
 func NewAggregator(window time.Duration) *Aggregator {
 	return &Aggregator{
-		window:       window,
-		nsSet:        make(map[string]struct{}),
-		nodeSet:      make(map[string]struct{}),
-		podCatalog:   make(map[string]observedPod),
-		podNodeVotes: make(map[string]map[string]int),
-		maxFlows:     100000,
+		window:   window,
+		nsSet:    make(map[string]struct{}),
+		maxFlows: 100000,
 	}
+}
+
+func (a *Aggregator) SetPodMetadataSource(source PodMetadataSource) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.podMetadataSource = source
 }
 
 // AddFlow adds a Hubble flow to the aggregator.
@@ -169,6 +190,14 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 	if srcService == "" || dstService == "" {
 		return
 	}
+
+	timestamp := time.Now()
+	if eventTime := flow.GetTime(); eventTime != nil {
+		if parsed := eventTime.AsTime(); !parsed.IsZero() {
+			timestamp = parsed
+		}
+	}
+	srcObservedNode, dstObservedNode := observedEndpointNodes(flow.GetNodeName(), flow.GetTrafficDirection())
 
 	proto := "unknown"
 	if l4 := flow.GetL4(); l4 != nil {
@@ -211,15 +240,15 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 	}
 
 	record := flowRecord{
-		timestamp:       time.Now(),
+		timestamp:       timestamp,
 		srcNS:           srcNS,
 		dstNS:           dstNS,
 		srcService:      srcService,
 		dstService:      dstService,
 		srcPod:          srcPod,
 		dstPod:          dstPod,
-		nodeName:        flow.GetNodeName(),
-		direction:       flow.GetTrafficDirection(),
+		srcObservedNode: srcObservedNode,
+		dstObservedNode: dstObservedNode,
 		verdict:         flow.GetVerdict(),
 		protocol:        proto,
 		flowType:        flowType,
@@ -240,19 +269,6 @@ func (a *Aggregator) AddFlow(flow *flowpb.Flow) {
 	if dstNS != "" {
 		a.nsSet[dstNS] = struct{}{}
 	}
-	if nodeName := flow.GetNodeName(); nodeName != "" {
-		a.nodeSet[nodeName] = struct{}{}
-	}
-	a.observePod(srcNS, podLabelOrFallback(srcPod, srcService))
-	a.observePod(dstNS, podLabelOrFallback(dstPod, dstService))
-	a.observePodNodes(
-		flow.GetNodeName(),
-		flow.GetTrafficDirection(),
-		qualifiedID(srcNS, podLabelOrFallback(srcPod, srcService)),
-		qualifiedID(dstNS, podLabelOrFallback(dstPod, dstService)),
-		podLabelOrFallback(srcPod, srcService),
-		podLabelOrFallback(dstPod, dstService),
-	)
 	// Evict oldest 10% when over capacity to avoid per-insert eviction overhead.
 	if len(a.flows) > a.maxFlows {
 		drop := a.maxFlows / 10
@@ -295,7 +311,6 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 
 	a.mu.Lock()
 	cutoff := time.Now().Add(-a.window)
-	// Prune old flows
 	n := 0
 	for _, f := range a.flows {
 		if f.timestamp.After(cutoff) {
@@ -305,7 +320,6 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 	}
 	a.flows = a.flows[:n]
 
-	// Copy relevant flows
 	filtered := make([]flowRecord, 0, len(a.flows))
 	for _, f := range a.flows {
 		if options.Namespace == "" || f.srcNS == options.Namespace || f.dstNS == options.Namespace {
@@ -313,22 +327,7 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 		}
 	}
 
-	var observedNodes []string
-	if viewMode == ViewModePod {
-		observedNodes = make([]string, 0, len(a.nodeSet))
-		for nodeName := range a.nodeSet {
-			if nodeName == "" {
-				continue
-			}
-			observedNodes = append(observedNodes, nodeName)
-		}
-		sort.Strings(observedNodes)
-	}
-
-	catalogPods := make([]observedPod, 0)
-	if viewMode == ViewModePod && options.Namespace != "" {
-		catalogPods = a.namespaceObservedPods(options.Namespace)
-	}
+	source := a.podMetadataSource
 	a.mu.Unlock()
 
 	windowSecs := a.window.Seconds()
@@ -336,18 +335,11 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 		windowSecs = 1
 	}
 
-	// Build nodes and links
 	nodeMap := make(map[string]*Node)
 	nodeTraffic := make(map[string]int)
 	podNodeVotes := make(map[string]map[string]int)
-	for _, pod := range catalogPods {
-		nodeMap[pod.ID] = &Node{
-			ID:        pod.ID,
-			Label:     pod.Label,
-			Namespace: pod.Namespace,
-			K8sNode:   pod.K8sNode,
-		}
-	}
+	podLastSeen := make(map[string]time.Time)
+	podSummary := &PodViewSummary{}
 
 	type edgeKey struct{ src, dst string }
 	edgeMap := make(map[edgeKey]*edgeAccumulator)
@@ -357,38 +349,33 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 			continue
 		}
 
-		srcLabel, dstLabel := labelsForView(f, viewMode)
-		if srcLabel == "" || dstLabel == "" {
+		srcNode, dstNode, unresolvedFlow := nodesForFlow(f, viewMode)
+		if srcNode == nil || dstNode == nil {
 			continue
 		}
-
-		srcID := qualifiedID(f.srcNS, srcLabel)
-		dstID := qualifiedID(f.dstNS, dstLabel)
-
-		if _, ok := nodeMap[srcID]; !ok {
-			nodeMap[srcID] = &Node{ID: srcID, Label: srcLabel, Namespace: f.srcNS}
+		if viewMode == ViewModePod && unresolvedFlow {
+			podSummary.UnresolvedFlows++
 		}
-		if _, ok := nodeMap[dstID]; !ok {
-			nodeMap[dstID] = &Node{ID: dstID, Label: dstLabel, Namespace: f.dstNS}
-		}
+
+		ensureNode(nodeMap, srcNode)
+		ensureNode(nodeMap, dstNode)
 
 		if viewMode == ViewModePod {
-			assignPodNodeVote(
-				podNodeVotes,
-				f.nodeName,
-				f.direction,
-				srcID,
-				dstID,
-				srcLabel,
-				dstLabel,
-			)
+			if srcNode.Kind == NodeKindPod {
+				addPodNodeVote(podNodeVotes, srcNode.ID, f.srcObservedNode)
+				updateLastSeen(podLastSeen, srcNode.ID, f.timestamp)
+			}
+			if dstNode.Kind == NodeKindPod {
+				addPodNodeVote(podNodeVotes, dstNode.ID, f.dstObservedNode)
+				updateLastSeen(podLastSeen, dstNode.ID, f.timestamp)
+			}
 		}
 
-		nodeMap[dstID].Traffic++
-		nodeTraffic[srcID]++
-		nodeTraffic[dstID]++
+		nodeMap[dstNode.ID].Traffic++
+		nodeTraffic[srcNode.ID]++
+		nodeTraffic[dstNode.ID]++
 
-		key := edgeKey{srcID, dstID}
+		key := edgeKey{srcNode.ID, dstNode.ID}
 		e, ok := edgeMap[key]
 		if !ok {
 			e = &edgeAccumulator{
@@ -435,7 +422,6 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 	graph := Graph{
 		ViewMode:     viewMode,
 		TrafficLayer: trafficLayer,
-		K8sNodes:     observedNodes,
 	}
 
 	if viewMode == ViewModePod && options.PodMaxNodes > 0 && options.Namespace == "" && len(nodeMap) > options.PodMaxNodes {
@@ -466,10 +452,35 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 	}
 
 	nodes := make([]Node, 0, len(nodeMap))
+	k8sNodeSet := make(map[string]struct{})
+	sourceReady := source != nil && source.Ready()
 	for _, n := range nodeMap {
 		if viewMode == ViewModePod {
-			if nodeName := dominantNodeName(podNodeVotes[n.ID]); nodeName != "" {
-				n.K8sNode = nodeName
+			switch n.Kind {
+			case NodeKindPod:
+				n.Lifecycle = NodeLifecycleLive
+				if sourceReady {
+					podMeta, ok := source.LookupPod(n.Namespace, n.Label)
+					if ok && podSeenDuringPodLifetime(podLastSeen[n.ID], podMeta) {
+						n.K8sNode = podMeta.NodeName
+					} else {
+						n.Lifecycle = NodeLifecycleTerminated
+						n.K8sNode = dominantNodeName(podNodeVotes[n.ID])
+					}
+				}
+				if n.Lifecycle == NodeLifecycleLive {
+					podSummary.LiveNodes++
+				} else {
+					podSummary.TerminatedNodes++
+				}
+			default:
+				n.Lifecycle = NodeLifecycleUnresolved
+				if n.Kind == NodeKindUnresolved {
+					podSummary.UnresolvedNodes++
+				}
+			}
+			if n.K8sNode != "" {
+				k8sNodeSet[n.K8sNode] = struct{}{}
 			}
 		}
 		nodes = append(nodes, *n)
@@ -499,6 +510,10 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 
 	graph.Nodes = nodes
 	graph.Links = links
+	if viewMode == ViewModePod {
+		graph.K8sNodes = sortedKeys(k8sNodeSet)
+		graph.PodSummary = podSummary
+	}
 	return graph
 }
 
@@ -655,92 +670,100 @@ func percentileLatencyMs(values []uint64, percentile float64) float64 {
 	return float64(sorted[index]) / float64(time.Millisecond)
 }
 
-func (a *Aggregator) observePod(namespace, label string) {
-	if namespace == "" || label == "" || label == "world" {
+func ensureNode(nodes map[string]*Node, candidate *Node) {
+	if candidate == nil || candidate.ID == "" {
 		return
 	}
-
-	id := qualifiedID(namespace, label)
-	if existing, ok := a.podCatalog[id]; ok {
-		if existing.K8sNode == "" {
-			existing.K8sNode = dominantNodeName(a.podNodeVotes[id])
-			a.podCatalog[id] = existing
-		}
+	if _, exists := nodes[candidate.ID]; exists {
 		return
 	}
+	nodes[candidate.ID] = &Node{
+		ID:        candidate.ID,
+		Label:     candidate.Label,
+		Namespace: candidate.Namespace,
+		K8sNode:   candidate.K8sNode,
+		Kind:      candidate.Kind,
+		Lifecycle: candidate.Lifecycle,
+	}
+}
 
-	a.podCatalog[id] = observedPod{
-		ID:        id,
+func nodesForFlow(f flowRecord, viewMode ViewMode) (*Node, *Node, bool) {
+	if viewMode != ViewModePod {
+		return serviceNode(f.srcNS, f.srcService), serviceNode(f.dstNS, f.dstService), false
+	}
+
+	srcNode := podViewNode(f.srcNS, f.srcService, f.srcPod)
+	dstNode := podViewNode(f.dstNS, f.dstService, f.dstPod)
+	if srcNode == nil || dstNode == nil {
+		return nil, nil, false
+	}
+
+	unresolvedFlow := srcNode.Kind == NodeKindUnresolved || dstNode.Kind == NodeKindUnresolved
+	return srcNode, dstNode, unresolvedFlow
+}
+
+func serviceNode(namespace, label string) *Node {
+	if label == "" {
+		return nil
+	}
+	return &Node{
+		ID:        qualifiedID(namespace, label),
 		Label:     label,
 		Namespace: namespace,
-		K8sNode:   dominantNodeName(a.podNodeVotes[id]),
 	}
 }
 
-func (a *Aggregator) observePodNodes(observerNode string, direction flowpb.TrafficDirection, srcID, dstID, srcLabel, dstLabel string) {
-	assignPodNodeVote(a.podNodeVotes, observerNode, direction, srcID, dstID, srcLabel, dstLabel)
-	for _, podID := range []string{srcID, dstID} {
-		pod, ok := a.podCatalog[podID]
-		if !ok {
-			continue
+func podViewNode(namespace, service, pod string) *Node {
+	switch {
+	case pod == "world":
+		return &Node{
+			ID:        "external/world",
+			Label:     "world",
+			Namespace: namespace,
+			Kind:      NodeKindExternal,
 		}
-		if nodeName := dominantNodeName(a.podNodeVotes[podID]); nodeName != "" {
-			pod.K8sNode = nodeName
-			a.podCatalog[podID] = pod
+	case pod != "":
+		return &Node{
+			ID:        qualifiedID(namespace, pod),
+			Label:     pod,
+			Namespace: namespace,
+			Kind:      NodeKindPod,
 		}
-	}
-}
-
-func (a *Aggregator) namespaceObservedPods(namespace string) []observedPod {
-	pods := make([]observedPod, 0)
-	for _, pod := range a.podCatalog {
-		if pod.Namespace != namespace {
-			continue
+	case service != "":
+		return &Node{
+			ID:        unresolvedID(namespace, service),
+			Label:     unresolvedLabel(service),
+			Namespace: namespace,
+			Kind:      NodeKindUnresolved,
 		}
-		pods = append(pods, pod)
+	default:
+		return nil
 	}
-	sort.SliceStable(pods, func(i, j int) bool {
-		return pods[i].ID < pods[j].ID
-	})
-	return pods
 }
 
-func labelsForView(f flowRecord, viewMode ViewMode) (string, string) {
-	if viewMode == ViewModePod {
-		return podLabelOrFallback(f.srcPod, f.srcService), podLabelOrFallback(f.dstPod, f.dstService)
-	}
-	return f.srcService, f.dstService
+func unresolvedID(namespace, service string) string {
+	return "unresolved/" + qualifiedID(namespace, service)
 }
 
-func podLabelOrFallback(pod, fallback string) string {
-	if pod != "" {
-		return pod
+func unresolvedLabel(service string) string {
+	if service == "" {
+		return "Unresolved Pod"
 	}
-	return fallback
+	return "Unresolved " + service
 }
 
-func assignPodNodeVote(votes map[string]map[string]int, observerNode string, direction flowpb.TrafficDirection, srcID, dstID, srcLabel, dstLabel string) {
+func observedEndpointNodes(observerNode string, direction flowpb.TrafficDirection) (string, string) {
 	if observerNode == "" {
-		return
+		return "", ""
 	}
 
 	switch direction {
 	case flowpb.TrafficDirection_EGRESS:
-		if srcLabel != "world" {
-			addPodNodeVote(votes, srcID, observerNode)
-		}
+		return observerNode, ""
 	case flowpb.TrafficDirection_INGRESS:
-		if dstLabel != "world" {
-			addPodNodeVote(votes, dstID, observerNode)
-		}
+		return "", observerNode
 	default:
-		// Unknown direction: keep a best-effort mapping by crediting both endpoints.
-		if srcLabel != "world" {
-			addPodNodeVote(votes, srcID, observerNode)
-		}
-		if dstLabel != "world" {
-			addPodNodeVote(votes, dstID, observerNode)
-		}
+		return observerNode, observerNode
 	}
 }
 
@@ -754,6 +777,16 @@ func addPodNodeVote(votes map[string]map[string]int, podID, nodeName string) {
 		votes[podID] = byNode
 	}
 	byNode[nodeName]++
+}
+
+func updateLastSeen(lastSeen map[string]time.Time, nodeID string, seenAt time.Time) {
+	if nodeID == "" || seenAt.IsZero() {
+		return
+	}
+	if current, ok := lastSeen[nodeID]; ok && !seenAt.After(current) {
+		return
+	}
+	lastSeen[nodeID] = seenAt
 }
 
 func dominantNodeName(votes map[string]int) string {
@@ -770,6 +803,25 @@ func dominantNodeName(votes map[string]int) string {
 		}
 	}
 	return bestNode
+}
+
+func podSeenDuringPodLifetime(lastSeen time.Time, pod PodMetadata) bool {
+	if lastSeen.IsZero() || pod.CreatedAt.IsZero() {
+		return true
+	}
+	return !lastSeen.Before(pod.CreatedAt)
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func qualifiedID(namespace, label string) string {

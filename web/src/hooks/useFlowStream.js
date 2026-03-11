@@ -345,8 +345,26 @@ function cloneL7Details(l7) {
   return cloned;
 }
 
+function clonePodSummary(summary) {
+  if (!summary || typeof summary !== 'object') {
+    return null;
+  }
+
+  const liveNodes = Number(summary.liveNodes);
+  const terminatedNodes = Number(summary.terminatedNodes);
+  const unresolvedNodes = Number(summary.unresolvedNodes);
+  const unresolvedFlows = Number(summary.unresolvedFlows);
+
+  return {
+    liveNodes: Number.isFinite(liveNodes) && liveNodes >= 0 ? liveNodes : 0,
+    terminatedNodes: Number.isFinite(terminatedNodes) && terminatedNodes >= 0 ? terminatedNodes : 0,
+    unresolvedNodes: Number.isFinite(unresolvedNodes) && unresolvedNodes >= 0 ? unresolvedNodes : 0,
+    unresolvedFlows: Number.isFinite(unresolvedFlows) && unresolvedFlows >= 0 ? unresolvedFlows : 0,
+  };
+}
+
 function createEmptyGraph(trafficLayer = TRAFFIC_LAYERS.l4) {
-  return { nodes: [], links: [], trafficLayer };
+  return { nodes: [], links: [], trafficLayer, podSummary: null };
 }
 
 function createInitialModeState(trafficLayer = TRAFFIC_LAYERS.l4) {
@@ -731,6 +749,8 @@ function updateExistingNode(existingNode, nodePatch, pinnedPosition, isDragging)
   existingNode.label = nodePatch.label;
   existingNode.namespace = nodePatch.namespace;
   existingNode.k8sNode = nodePatch.k8sNode;
+  existingNode.kind = nodePatch.kind;
+  existingNode.lifecycle = nodePatch.lifecycle;
   existingNode.traffic = nodePatch.traffic;
 
   if (isDragging && Number.isFinite(existingNode.x) && Number.isFinite(existingNode.y)) {
@@ -867,7 +887,12 @@ function mergeGraphUpdate(prevGraphData, incomingGraph, nodePositions, draggingN
     }
   }
 
-  return { nodes: nextNodes, links: nextLinks };
+  return {
+    nodes: nextNodes,
+    links: nextLinks,
+    trafficLayer: resolveTrafficLayer(incomingGraph?.trafficLayer),
+    podSummary: clonePodSummary(incomingGraph?.podSummary),
+  };
 }
 
 function updateModeConnected(prev, mode, connected) {
@@ -1106,7 +1131,6 @@ export function useFlowStream(
             );
             const k8sNodes = mode === VIEW_MODES.pod
               ? normalizeKnownK8sNodes(
-                currentModeState.k8sNodes,
                 incoming?.k8sNodes,
                 collectKnownK8sNodesFromGraph(graphData.nodes),
               )
@@ -1127,7 +1151,6 @@ export function useFlowStream(
                 ...currentModeState,
                 graphData: {
                   ...graphData,
-                  trafficLayer: resolveTrafficLayer(incoming?.trafficLayer),
                 },
                 truncation: normalizeTruncation(incoming?.truncation),
                 nodeGroupBoxes,

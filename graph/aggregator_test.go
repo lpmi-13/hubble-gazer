@@ -24,6 +24,20 @@ func TestParseTrafficLayer(t *testing.T) {
 	}
 }
 
+type staticPodMetadataSource struct {
+	ready bool
+	pods  map[string]PodMetadata
+}
+
+func (s staticPodMetadataSource) Ready() bool {
+	return s.ready
+}
+
+func (s staticPodMetadataSource) LookupPod(namespace, name string) (PodMetadata, bool) {
+	pod, ok := s.pods[qualifiedID(namespace, name)]
+	return pod, ok
+}
+
 func TestSnapshotIncludesProtocolMixAndDominantProtocol(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
 
@@ -94,6 +108,13 @@ func TestSnapshotWithOptionsPodViewUsesPodIdentity(t *testing.T) {
 
 func TestSnapshotWithOptionsPodViewIncludesK8sNode(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
+	aggregator.SetPodMetadataSource(staticPodMetadataSource{
+		ready: true,
+		pods: map[string]PodMetadata{
+			"demo/frontend-0": {NodeName: "node-z"},
+			"demo/api-0":      {NodeName: "node-y"},
+		},
+	})
 
 	aggregator.AddFlow(newFlowWithPodsOnNode(
 		"demo", "frontend", "frontend-0",
@@ -133,16 +154,16 @@ func TestSnapshotWithOptionsPodViewIncludesK8sNode(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected frontend pod node to exist")
 	}
-	if frontend.K8sNode != "node-a" {
-		t.Fatalf("expected frontend pod to map to node-a, got %q", frontend.K8sNode)
+	if frontend.K8sNode != "node-z" {
+		t.Fatalf("expected frontend pod to map to metadata node-z, got %q", frontend.K8sNode)
 	}
 
 	api, ok := byID["demo/api-0"]
 	if !ok {
 		t.Fatalf("expected api pod node to exist")
 	}
-	if api.K8sNode != "node-c" {
-		t.Fatalf("expected api pod to map to node-c, got %q", api.K8sNode)
+	if api.K8sNode != "node-y" {
+		t.Fatalf("expected api pod to map to metadata node-y, got %q", api.K8sNode)
 	}
 }
 
@@ -192,8 +213,17 @@ func TestSnapshotWithOptionsPodViewAppliesTopNTruncation(t *testing.T) {
 	}
 }
 
-func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsAllObservedK8sNodes(t *testing.T) {
+func TestSnapshotWithOptionsPodViewNamespaceFilterUsesCurrentGraphNodesOnly(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
+	aggregator.SetPodMetadataSource(staticPodMetadataSource{
+		ready: true,
+		pods: map[string]PodMetadata{
+			"demo/frontend-0":  {NodeName: "node-a"},
+			"demo/api-0":       {NodeName: "node-a"},
+			"other/frontend-0": {NodeName: "node-b"},
+			"other/api-0":      {NodeName: "node-b"},
+		},
+	})
 
 	aggregator.AddFlow(newFlowWithPodsOnNode(
 		"demo", "frontend", "frontend-0",
@@ -212,10 +242,10 @@ func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsAllObservedK8sNodes(t *te
 		Namespace: "demo",
 		ViewMode:  ViewModePod,
 	})
-	if len(filtered.K8sNodes) != 2 {
-		t.Fatalf("expected 2 observed k8s nodes, got %d", len(filtered.K8sNodes))
+	if len(filtered.K8sNodes) != 1 {
+		t.Fatalf("expected 1 active k8s node, got %d", len(filtered.K8sNodes))
 	}
-	if filtered.K8sNodes[0] != "node-a" || filtered.K8sNodes[1] != "node-b" {
+	if filtered.K8sNodes[0] != "node-a" {
 		t.Fatalf("unexpected k8s node list: %#v", filtered.K8sNodes)
 	}
 
@@ -226,8 +256,8 @@ func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsAllObservedK8sNodes(t *te
 	if len(emptyFiltered.Nodes) != 0 {
 		t.Fatalf("expected 0 pod nodes for missing namespace, got %d", len(emptyFiltered.Nodes))
 	}
-	if len(emptyFiltered.K8sNodes) != 2 {
-		t.Fatalf("expected observed k8s nodes to remain visible, got %d", len(emptyFiltered.K8sNodes))
+	if len(emptyFiltered.K8sNodes) != 0 {
+		t.Fatalf("expected no active k8s nodes for missing namespace, got %d", len(emptyFiltered.K8sNodes))
 	}
 }
 
@@ -282,8 +312,12 @@ func TestSnapshotWithOptionsL7AggregatesHTTPDetails(t *testing.T) {
 	}
 }
 
-func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsObservedPodsWithoutCurrentTrafficAcrossLayers(t *testing.T) {
+func TestSnapshotWithOptionsPodViewMarksMissingPodsAsTerminatedWithinWindow(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
+	aggregator.SetPodMetadataSource(staticPodMetadataSource{
+		ready: true,
+		pods:  map[string]PodMetadata{},
+	})
 
 	aggregator.AddFlow(newFlowWithPodsOnNode(
 		"demo", "frontend", "frontend-0",
@@ -298,12 +332,6 @@ func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsObservedPodsWithoutCurren
 		flowpb.L7FlowType_REQUEST, "GET", 0, 0,
 	))
 
-	aggregator.mu.Lock()
-	for i := range aggregator.flows {
-		aggregator.flows[i].timestamp = time.Now().Add(-2 * aggregator.window)
-	}
-	aggregator.mu.Unlock()
-
 	l4Snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
 		Namespace:    "demo",
 		ViewMode:     ViewModePod,
@@ -311,10 +339,18 @@ func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsObservedPodsWithoutCurren
 		PodMaxNodes:  1,
 	})
 	if len(l4Snapshot.Nodes) != 2 {
-		t.Fatalf("expected idle pods to remain visible in l4 pod view, got %d nodes", len(l4Snapshot.Nodes))
+		t.Fatalf("expected recent terminated pods to remain visible in l4 pod view, got %d nodes", len(l4Snapshot.Nodes))
 	}
 	if l4Snapshot.Truncation != nil {
 		t.Fatalf("did not expect truncation for namespace-filtered pod view")
+	}
+	if l4Snapshot.PodSummary == nil || l4Snapshot.PodSummary.TerminatedNodes != 2 {
+		t.Fatalf("expected both pod nodes to be marked terminated, got %+v", l4Snapshot.PodSummary)
+	}
+	for _, node := range l4Snapshot.Nodes {
+		if node.Lifecycle != NodeLifecycleTerminated {
+			t.Fatalf("expected node %s to be terminated, got %q", node.ID, node.Lifecycle)
+		}
 	}
 
 	l7Snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
@@ -324,13 +360,64 @@ func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsObservedPodsWithoutCurren
 		PodMaxNodes:  1,
 	})
 	if len(l7Snapshot.Nodes) != 2 {
-		t.Fatalf("expected idle pods to remain visible in l7 pod view, got %d nodes", len(l7Snapshot.Nodes))
+		t.Fatalf("expected recent terminated pods to remain visible in l7 pod view, got %d nodes", len(l7Snapshot.Nodes))
 	}
-	if len(l7Snapshot.Links) != 0 {
-		t.Fatalf("expected no active l7 links after window expiry, got %d", len(l7Snapshot.Links))
+	if len(l7Snapshot.Links) != 1 {
+		t.Fatalf("expected active l7 links while flows remain in window, got %d", len(l7Snapshot.Links))
 	}
 	if l7Snapshot.Truncation != nil {
 		t.Fatalf("did not expect truncation for namespace-filtered l7 pod view")
+	}
+
+	aggregator.mu.Lock()
+	for i := range aggregator.flows {
+		aggregator.flows[i].timestamp = time.Now().Add(-2 * aggregator.window)
+	}
+	aggregator.mu.Unlock()
+
+	expiredSnapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace:    "demo",
+		ViewMode:     ViewModePod,
+		TrafficLayer: TrafficLayerL4,
+	})
+	if len(expiredSnapshot.Nodes) != 0 {
+		t.Fatalf("expected terminated pods to disappear after flow window expiry, got %d nodes", len(expiredSnapshot.Nodes))
+	}
+}
+
+func TestSnapshotWithOptionsPodViewUsesUnresolvedBucketsWhenPodNameIsMissing(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlowWithResolvedSourceAndUnresolvedDestination(
+		"demo", "frontend", "frontend-0",
+		"demo", "reviews",
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+
+	snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		ViewMode: ViewModePod,
+	})
+	if snapshot.PodSummary == nil {
+		t.Fatalf("expected pod summary to be populated")
+	}
+	if snapshot.PodSummary.UnresolvedNodes != 1 || snapshot.PodSummary.UnresolvedFlows != 1 {
+		t.Fatalf("unexpected unresolved summary: %+v", snapshot.PodSummary)
+	}
+
+	byID := make(map[string]Node, len(snapshot.Nodes))
+	for _, node := range snapshot.Nodes {
+		byID[node.ID] = node
+	}
+
+	unresolved, ok := byID["unresolved/demo/reviews"]
+	if !ok {
+		t.Fatalf("expected unresolved reviews bucket to exist")
+	}
+	if unresolved.Kind != NodeKindUnresolved {
+		t.Fatalf("expected unresolved bucket kind, got %q", unresolved.Kind)
+	}
+	if unresolved.Lifecycle != NodeLifecycleUnresolved {
+		t.Fatalf("expected unresolved bucket lifecycle, got %q", unresolved.Lifecycle)
 	}
 }
 
@@ -378,6 +465,22 @@ func newFlowWithPodsOnNode(srcNS, srcApp, srcPod, dstNS, dstApp, dstPod, nodeNam
 		TrafficDirection: direction,
 		Verdict:          verdict,
 		L4:               protocolLayer(protocol),
+	}
+}
+
+func newFlowWithResolvedSourceAndUnresolvedDestination(srcNS, srcApp, srcPod, dstNS, dstApp string, verdict flowpb.Verdict, protocol string) *flowpb.Flow {
+	return &flowpb.Flow{
+		Source: &flowpb.Endpoint{
+			Namespace: srcNS,
+			PodName:   srcPod,
+			Labels:    []string{"app=" + srcApp},
+		},
+		Destination: &flowpb.Endpoint{
+			Namespace: dstNS,
+			Labels:    []string{"app=" + dstApp},
+		},
+		Verdict: verdict,
+		L4:      protocolLayer(protocol),
 	}
 }
 

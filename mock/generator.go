@@ -43,17 +43,7 @@ type Generator struct {
 var mockNodePool = []string{"worker-a", "worker-b", "worker-c", "worker-d"}
 
 func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
-	edges := []edge{
-		// Heavy internal traffic.
-		{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "reviews", proto: "TCP", dstPort: 9080, dropChance: 0.08, weight: 28, burstMin: 2, burstMax: 6},
-		{srcNS: "default", srcSvc: "frontend", dstNS: "default", dstSvc: "api", proto: "TCP", dstPort: 8080, dropChance: 0.1, weight: 24, burstMin: 2, burstMax: 5},
-		// Medium traffic.
-		{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "details", proto: "TCP", dstPort: 9080, dropChance: 0.04, weight: 14, burstMin: 1, burstMax: 3},
-		{srcNS: "demo", srcSvc: "reviews", dstNS: "demo", dstSvc: "ratings", proto: "TCP", dstPort: 9080, dropChance: 0.12, weight: 10, burstMin: 1, burstMax: 3},
-		{srcNS: "default", srcSvc: "api", dstNS: "", dstSvc: "world", proto: "TCP", dstPort: 443, dropChance: 0.06, weight: 8, burstMin: 1, burstMax: 2},
-		// Low but steady DNS.
-		{srcNS: "demo", srcSvc: "productpage", dstNS: "kube-system", dstSvc: "kube-dns", proto: "UDP", dstPort: 53, dropChance: 0.02, weight: 6, burstMin: 1, burstMax: 2},
-	}
+	edges := defaultEdges()
 
 	totalWeight := 0
 	for _, e := range edges {
@@ -75,6 +65,20 @@ func NewGenerator(seed int64, consumer FlowConsumer) *Generator {
 		totalW:        totalWeight,
 		replicaCounts: replicaCounts,
 		replicaNodes:  replicaNodes,
+	}
+}
+
+func defaultEdges() []edge {
+	return []edge{
+		// Heavy internal traffic.
+		{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "reviews", proto: "TCP", dstPort: 9080, dropChance: 0.08, weight: 28, burstMin: 2, burstMax: 6},
+		{srcNS: "default", srcSvc: "frontend", dstNS: "default", dstSvc: "api", proto: "TCP", dstPort: 8080, dropChance: 0.1, weight: 24, burstMin: 2, burstMax: 5},
+		// Medium traffic.
+		{srcNS: "demo", srcSvc: "productpage", dstNS: "demo", dstSvc: "details", proto: "TCP", dstPort: 9080, dropChance: 0.04, weight: 14, burstMin: 1, burstMax: 3},
+		{srcNS: "demo", srcSvc: "reviews", dstNS: "demo", dstSvc: "ratings", proto: "TCP", dstPort: 9080, dropChance: 0.12, weight: 10, burstMin: 1, burstMax: 3},
+		{srcNS: "default", srcSvc: "api", dstNS: "", dstSvc: "world", proto: "TCP", dstPort: 443, dropChance: 0.06, weight: 8, burstMin: 1, burstMax: 2},
+		// Low but steady DNS.
+		{srcNS: "demo", srcSvc: "productpage", dstNS: "kube-system", dstSvc: "kube-dns", proto: "UDP", dstPort: 53, dropChance: 0.02, weight: 6, burstMin: 1, burstMax: 2},
 	}
 }
 

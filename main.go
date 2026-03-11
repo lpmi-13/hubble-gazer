@@ -16,6 +16,7 @@ import (
 
 	"github.com/iximiuz/hubble-gazer/graph"
 	"github.com/iximiuz/hubble-gazer/hubble"
+	"github.com/iximiuz/hubble-gazer/k8smeta"
 	"github.com/iximiuz/hubble-gazer/mock"
 )
 
@@ -32,13 +33,28 @@ func main() {
 	podViewMaxNodes := envOrPositiveInt("POD_VIEW_MAX_NODES", 500)
 
 	aggregator := graph.NewAggregator(30 * time.Second)
+	const mockSeed int64 = 42
 
 	switch flowSource {
 	case "mock":
-		generator := mock.NewGenerator(42, aggregator)
+		aggregator.SetPodMetadataSource(mock.NewMetadataSource(mockSeed))
+		generator := mock.NewGenerator(mockSeed, aggregator)
 		go generator.Run(context.Background())
 		log.Printf("flow source: mock generator")
 	case "hubble":
+		resolver, err := k8smeta.NewResolverFromEnvironment()
+		if err != nil {
+			log.Printf("kubernetes pod metadata disabled: %v", err)
+		} else {
+			aggregator.SetPodMetadataSource(resolver)
+			go func() {
+				if runErr := resolver.Run(context.Background()); runErr != nil && runErr != context.Canceled {
+					log.Printf("kubernetes pod metadata stopped: %v", runErr)
+				}
+			}()
+			log.Printf("pod metadata source: kubernetes api")
+		}
+
 		client := hubble.NewClient(relayAddr, hubbleTLS, aggregator)
 		go func() {
 			for {
