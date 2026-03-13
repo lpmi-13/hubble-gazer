@@ -13,6 +13,12 @@ const {
   applyGroupedLayoutInPlace,
   applyGroupedLayoutTargetsInPlace,
   applyNodeGroupedLayoutInPlace,
+  buildDefaultLayoutModeState,
+  stableNodePosition,
+  snapshotTransitionPositions,
+  snapshotModeTransitionPositions,
+  buildPositionSeedMap,
+  prepareModeStateForStreamRefresh,
 } = __TEST_ONLY__;
 
 test('buildFlowStreamPath includes view namespace and traffic layer', () => {
@@ -45,6 +51,194 @@ test('nodeRadius is fixed regardless of traffic', () => {
 
   assert.equal(low, high);
   assert.equal(low, 10);
+});
+
+test('stableNodePosition prefers layout targets over current coordinates', () => {
+  assert.deepEqual(
+    stableNodePosition({ x: 120, y: -40, layoutTargetX: 8, layoutTargetY: 16 }),
+    { x: 8, y: 16 },
+  );
+  assert.deepEqual(
+    stableNodePosition({ x: 120, y: -40 }),
+    { x: 120, y: -40 },
+  );
+  assert.equal(stableNodePosition({ x: 120 }), null);
+});
+
+test('snapshotTransitionPositions captures stable grouped positions with node identity', () => {
+  const positions = snapshotTransitionPositions([
+    {
+      id: 'demo/reviews-0',
+      x: 300,
+      y: 180,
+      layoutTargetX: -24,
+      layoutTargetY: 44,
+      k8sNode: 'worker-a',
+    },
+    {
+      id: 'demo/reviews-1',
+      x: 12,
+      y: -8,
+    },
+  ]);
+
+  assert.deepEqual(positions.get('demo/reviews-0'), {
+    x: -24,
+    y: 44,
+    k8sNode: 'worker-a',
+  });
+  assert.deepEqual(positions.get('demo/reviews-1'), {
+    x: 12,
+    y: -8,
+    k8sNode: 'unknown',
+  });
+});
+
+test('buildPositionSeedMap reuses layer-transition positions only for same-node pods', () => {
+  const persisted = new Map([
+    ['demo/details-0', { x: 400, y: -220 }],
+  ]);
+  const carryover = new Map([
+    ['demo/reviews-0', { x: 18, y: 32, k8sNode: 'worker-a' }],
+    ['demo/reviews-1', { x: 90, y: 120, k8sNode: 'worker-a' }],
+  ]);
+
+  const seeds = buildPositionSeedMap(
+    [
+      { id: 'demo/details-0', k8sNode: 'worker-z' },
+      { id: 'demo/reviews-0', k8sNode: 'worker-a' },
+      { id: 'demo/reviews-1', k8sNode: 'worker-b' },
+      { id: 'demo/new-0', k8sNode: 'worker-a' },
+    ],
+    persisted,
+    carryover,
+  );
+
+  assert.deepEqual(seeds.get('demo/details-0'), { x: 400, y: -220 });
+  assert.deepEqual(seeds.get('demo/reviews-0'), { x: 18, y: 32 });
+  assert.equal(seeds.has('demo/reviews-1'), false);
+  assert.equal(seeds.has('demo/new-0'), false);
+});
+
+test('snapshotModeTransitionPositions captures current positions for each mode', () => {
+  const snapshots = snapshotModeTransitionPositions({
+    service: {
+      graphData: {
+        nodes: [
+          { id: 'default/frontend', x: 42, y: -18 },
+        ],
+      },
+    },
+    pod: {
+      graphData: {
+        nodes: [
+          {
+            id: 'demo/reviews-0',
+            x: 100,
+            y: 120,
+            layoutTargetX: -12,
+            layoutTargetY: 28,
+            k8sNode: 'worker-a',
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(snapshots.service.get('default/frontend'), {
+    x: 42,
+    y: -18,
+    k8sNode: 'unknown',
+  });
+  assert.deepEqual(snapshots.pod.get('demo/reviews-0'), {
+    x: -12,
+    y: 28,
+    k8sNode: 'worker-a',
+  });
+});
+
+test('applyNodeGroupedLayoutInPlace preserves carried positions for surviving nodes after refresh', () => {
+  const initialNodes = [
+    { id: 'demo/reviews-0', label: 'reviews-0', namespace: 'demo', k8sNode: 'worker-a', traffic: 3 },
+    { id: 'demo/reviews-1', label: 'reviews-1', namespace: 'demo', k8sNode: 'worker-a', traffic: 3 },
+    { id: 'demo/details-0', label: 'details-0', namespace: 'demo', k8sNode: 'worker-b', traffic: 3 },
+  ];
+
+  applyNodeGroupedLayoutInPlace(initialNodes, null, null, ['worker-a', 'worker-b']);
+  const carryover = snapshotTransitionPositions(initialNodes);
+
+  const nextNodes = initialNodes
+    .filter((node) => node.id !== 'demo/reviews-1')
+    .map((node) => ({ ...node }));
+  const seeds = buildPositionSeedMap(nextNodes, new Map(), carryover);
+
+  applyNodeGroupedLayoutInPlace(nextNodes, seeds, null, ['worker-a', 'worker-b']);
+
+  for (const node of nextNodes) {
+    const carried = carryover.get(node.id);
+    assert.ok(carried);
+    assert.ok(Math.abs(node.layoutTargetX - carried.x) < 0.001);
+    assert.ok(Math.abs(node.layoutTargetY - carried.y) < 0.001);
+  }
+});
+
+test('buildDefaultLayoutModeState clears worker node boxes for plain pod layout', () => {
+  const modeState = {
+    layoutMode: 'k8sNode',
+    nodeGroupBoxes: [{ key: 'worker-a', minX: -10, maxX: 10, minY: -10, maxY: 10 }],
+    graphData: {
+      nodes: [
+        {
+          id: 'demo/reviews-0',
+          label: 'reviews-0',
+          namespace: 'demo',
+          k8sNode: 'worker-a',
+          traffic: 3,
+          x: 120,
+          y: 60,
+          layoutTargetX: 120,
+          layoutTargetY: 60,
+        },
+      ],
+      links: [],
+    },
+  };
+
+  const next = buildDefaultLayoutModeState(modeState);
+
+  assert.equal(next.layoutMode, 'default');
+  assert.deepEqual(next.nodeGroupBoxes, []);
+  assert.equal(next.graphData.nodes.length, 1);
+  assert.ok(Number.isFinite(next.graphData.nodes[0].layoutTargetX));
+  assert.ok(Number.isFinite(next.graphData.nodes[0].layoutTargetY));
+});
+
+test('prepareModeStateForStreamRefresh keeps graph and layout state while reconnecting', () => {
+  const modeState = {
+    connected: true,
+    truncation: { reason: 'topN', limit: 10, totalNodes: 22, shownNodes: 10 },
+    layoutMode: 'k8sNode',
+    nodeGroupBoxes: [{ key: 'worker-a', minX: -10, maxX: 10, minY: -10, maxY: 10 }],
+    k8sNodes: ['worker-a'],
+    graphData: {
+      nodes: [{ id: 'demo/productpage', x: 10, y: 20 }],
+      links: [{ source: 'demo/productpage', target: 'world', flowRate: 1 }],
+      trafficLayer: TRAFFIC_LAYERS.l4,
+      podSummary: { liveNodes: 1, terminatedNodes: 0, unresolvedNodes: 0, unresolvedFlows: 0 },
+    },
+  };
+
+  const next = prepareModeStateForStreamRefresh(modeState, TRAFFIC_LAYERS.l7);
+
+  assert.equal(next.connected, false);
+  assert.equal(next.refreshing, true);
+  assert.equal(next.truncation, modeState.truncation);
+  assert.equal(next.layoutMode, 'k8sNode');
+  assert.equal(next.nodeGroupBoxes, modeState.nodeGroupBoxes);
+  assert.equal(next.k8sNodes, modeState.k8sNodes);
+  assert.equal(next.graphData.nodes, modeState.graphData.nodes);
+  assert.equal(next.graphData.links, modeState.graphData.links);
+  assert.equal(next.graphData.trafficLayer, TRAFFIC_LAYERS.l4);
 });
 
 test('mergeGraphUpdate preserves existing node position and pins it', () => {
@@ -426,10 +620,44 @@ test('applyNodeGroupedLayoutInPlace includes empty boxes for known Kubernetes no
     null,
     ['worker-a', 'worker-b', 'worker-c', 'unknown'],
   );
-  assert.equal(boxes.length, 4);
+  assert.equal(boxes.length, 3);
 
   const keys = boxes.map((box) => box.key).sort((a, b) => a.localeCompare(b));
-  assert.deepEqual(keys, ['unknown', 'worker-a', 'worker-b', 'worker-c']);
+  assert.deepEqual(keys, ['worker-a', 'worker-b', 'worker-c']);
+});
+
+test('applyNodeGroupedLayoutInPlace leaves unresolved and external endpoints outside worker boxes', () => {
+  const nodes = [
+    { id: 'demo/reviews-0', label: 'reviews-0', namespace: 'demo', k8sNode: 'worker-a', kind: 'pod', traffic: 2 },
+    { id: 'unresolved/demo/reviews', label: 'Unresolved reviews', namespace: 'demo', kind: 'unresolved', traffic: 1 },
+    { id: 'external/world', label: 'world', namespace: '', kind: 'external', traffic: 1 },
+  ];
+
+  const boxes = applyNodeGroupedLayoutInPlace(nodes);
+  assert.equal(boxes.length, 1);
+  assert.equal(boxes[0].key, 'worker-a');
+
+  const workerBox = boxes[0];
+  const unresolved = nodes.find((node) => node.id === 'unresolved/demo/reviews');
+  const external = nodes.find((node) => node.id === 'external/world');
+
+  assert.ok(unresolved);
+  assert.ok(external);
+  assert.ok(Number.isFinite(unresolved.layoutTargetX));
+  assert.ok(Number.isFinite(unresolved.layoutTargetY));
+  assert.ok(Number.isFinite(external.layoutTargetX));
+  assert.ok(Number.isFinite(external.layoutTargetY));
+
+  assert.equal(
+    unresolved.layoutTargetX >= workerBox.minX && unresolved.layoutTargetX <= workerBox.maxX
+      && unresolved.layoutTargetY >= workerBox.minY && unresolved.layoutTargetY <= workerBox.maxY,
+    false,
+  );
+  assert.equal(
+    external.layoutTargetX >= workerBox.minX && external.layoutTargetX <= workerBox.maxX
+      && external.layoutTargetY >= workerBox.minY && external.layoutTargetY <= workerBox.maxY,
+    false,
+  );
 });
 
 test('applyNodeGroupedLayoutInPlace keeps worker node boxes on a circle', () => {

@@ -44,6 +44,11 @@ const NODE_GROUP_RING_STEP = 18;
 const NODE_GROUP_BOX_PADDING = 52;
 const NODE_GROUP_BOX_MIN_HALF_SIZE = 132;
 const NODE_GROUP_INNER_PADDING = NODE_RADIUS + 10;
+const NODE_GROUP_FREE_NODE_GAP = 150;
+const NODE_GROUP_FREE_NODE_EXTERNAL_OFFSET = 64;
+const NODE_GROUP_FREE_SLOT_CAPACITY = 8;
+const NODE_GROUP_FREE_BASE_RADIUS = 22;
+const NODE_GROUP_FREE_RING_STEP = 16;
 
 function hashString(input) {
   let hash = 0;
@@ -95,9 +100,21 @@ function groupedPositionForNode(node) {
   };
 }
 
+function normalizeK8sNodeKey(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized.length > 0 ? normalized : 'unknown';
+}
+
+function concreteK8sNodeKey(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (normalized.length === 0 || normalized === 'unknown') {
+    return '';
+  }
+  return normalized;
+}
+
 function nodeGroupKeyForNode(node) {
-  const value = typeof node?.k8sNode === 'string' ? node.k8sNode.trim() : '';
-  return value.length > 0 ? value : 'unknown';
+  return concreteK8sNodeKey(node?.k8sNode);
 }
 
 function normalizeKnownK8sNodes(...sources) {
@@ -129,10 +146,7 @@ function collectKnownK8sNodesFromGraph(nodes) {
 
   const keys = [];
   for (const node of nodes) {
-    if (!node || typeof node.k8sNode !== 'string') {
-      continue;
-    }
-    const key = node.k8sNode.trim();
+    const key = concreteK8sNodeKey(node?.k8sNode);
     if (key.length === 0) {
       continue;
     }
@@ -170,19 +184,87 @@ function nodeGroupCenters(keys) {
   return centers;
 }
 
+function groupedLayoutOuterRadius(boxes) {
+  let maxRadius = NODE_GROUP_CIRCLE_MIN_RADIUS + NODE_GROUP_BOX_MIN_HALF_SIZE;
+
+  for (const box of boxes || []) {
+    if (!box) {
+      continue;
+    }
+    const halfWidth = Math.max(0, (Number(box.maxX) - Number(box.minX)) / 2);
+    const halfHeight = Math.max(0, (Number(box.maxY) - Number(box.minY)) / 2);
+    const halfSize = Math.max(halfWidth, halfHeight);
+    const radius = Math.hypot(Number(box.centerX) || 0, Number(box.centerY) || 0) + halfSize;
+    if (Number.isFinite(radius)) {
+      maxRadius = Math.max(maxRadius, radius);
+    }
+  }
+
+  return maxRadius;
+}
+
+function freeNodeOrbitAngle(node) {
+  if (node?.kind === 'external') {
+    return -Math.PI / 2;
+  }
+
+  const namespace = node?.namespace || '';
+  const center = NAMESPACE_CENTERS[namespace] || { x: 0, y: 240 };
+  if (!Number.isFinite(center.x) || !Number.isFinite(center.y) || (center.x === 0 && center.y === 0)) {
+    return Math.PI / 2;
+  }
+  return Math.atan2(center.y, center.x);
+}
+
+function freeNodeAnchorForGroupedLayout(node, outerRadius) {
+  const baseAngle = freeNodeOrbitAngle(node);
+  const offset = node?.kind === 'external' ? NODE_GROUP_FREE_NODE_EXTERNAL_OFFSET : 0;
+  const radius = Math.max(outerRadius + NODE_GROUP_FREE_NODE_GAP + offset, NODE_GROUP_CIRCLE_MIN_RADIUS);
+
+  return {
+    x: Math.cos(baseAngle) * radius,
+    y: Math.sin(baseAngle) * radius,
+  };
+}
+
+function freeNodePositionForGroupedLayout(node, outerRadius) {
+  const anchor = freeNodeAnchorForGroupedLayout(node, outerRadius);
+  const label = typeof node?.label === 'string' && node.label.length > 0
+    ? node.label
+    : (typeof node?.id === 'string' ? node.id : 'unknown');
+  const { base, replica } = parseReplicaIdentity(label);
+  const fallbackSeed = hashString(node?.id || label);
+  const ordinal = Number.isInteger(replica) ? replica : (fallbackSeed % NODE_GROUP_FREE_SLOT_CAPACITY);
+  const ring = Math.floor(ordinal / NODE_GROUP_FREE_SLOT_CAPACITY);
+  const slot = ordinal % NODE_GROUP_FREE_SLOT_CAPACITY;
+  const rotation = (hashString(`free-node:${node?.namespace || ''}/${base}/${node?.kind || 'node'}`) % 360) * (Math.PI / 180);
+  const angle = rotation + ((slot / NODE_GROUP_FREE_SLOT_CAPACITY) * (Math.PI * 2));
+  const radius = NODE_GROUP_FREE_BASE_RADIUS + (ring * NODE_GROUP_FREE_RING_STEP);
+
+  return {
+    x: anchor.x + (Math.cos(angle) * radius),
+    y: anchor.y + (Math.sin(angle) * radius),
+  };
+}
+
 function buildNodeGroupLayoutPlan(nodes, knownNodeKeys = []) {
   const groups = new Map();
-  for (const key of normalizeKnownK8sNodes(knownNodeKeys)) {
+  for (const key of normalizeKnownK8sNodes(knownNodeKeys).map((value) => concreteK8sNodeKey(value)).filter(Boolean)) {
     if (!groups.has(key)) {
       groups.set(key, []);
     }
   }
+  const freeNodes = [];
 
   for (const node of nodes) {
     if (!node || typeof node.id !== 'string') {
       continue;
     }
     const key = nodeGroupKeyForNode(node);
+    if (key.length === 0) {
+      freeNodes.push(node);
+      continue;
+    }
     if (!groups.has(key)) {
       groups.set(key, []);
     }
@@ -215,7 +297,7 @@ function buildNodeGroupLayoutPlan(nodes, knownNodeKeys = []) {
     const halfSize = Math.max(NODE_GROUP_BOX_MIN_HALF_SIZE, maxRadius + NODE_GROUP_BOX_PADDING);
     const box = {
       key,
-      label: key === 'unknown' ? 'Unknown Node' : key,
+      label: key,
       centerX: center.x,
       centerY: center.y,
       minX: center.x - halfSize,
@@ -241,6 +323,17 @@ function buildNodeGroupLayoutPlan(nodes, knownNodeKeys = []) {
         key,
       });
     }
+  }
+
+  const freeNodeRadius = groupedLayoutOuterRadius(boxes);
+  freeNodes.sort((a, b) => {
+    const aID = typeof a.id === 'string' ? a.id : '';
+    const bID = typeof b.id === 'string' ? b.id : '';
+    return aID.localeCompare(bID);
+  });
+  for (const node of freeNodes) {
+    const position = freeNodePositionForGroupedLayout(node, freeNodeRadius);
+    targetsByID.set(node.id, position);
   }
 
   return { boxes, targetsByID };
@@ -371,10 +464,25 @@ function createInitialModeState(trafficLayer = TRAFFIC_LAYERS.l4) {
   return {
     graphData: createEmptyGraph(trafficLayer),
     connected: false,
+    refreshing: false,
     truncation: null,
     layoutMode: LAYOUT_MODES.default,
     nodeGroupBoxes: [],
     k8sNodes: [],
+  };
+}
+
+function prepareModeStateForStreamRefresh(modeState, trafficLayer = TRAFFIC_LAYERS.l4) {
+  const currentModeState = modeState || createInitialModeState(trafficLayer);
+  const graphData = currentModeState.graphData && typeof currentModeState.graphData === 'object'
+    ? currentModeState.graphData
+    : createEmptyGraph(trafficLayer);
+
+  return {
+    ...currentModeState,
+    connected: false,
+    refreshing: true,
+    graphData,
   };
 }
 
@@ -462,6 +570,93 @@ function setNodeFixedPosition(node, x, y) {
   node.vy = 0;
   node.layoutTargetX = x;
   node.layoutTargetY = y;
+}
+
+function stableNodePosition(node) {
+  const targetX = Number(node?.layoutTargetX);
+  const targetY = Number(node?.layoutTargetY);
+  if (Number.isFinite(targetX) && Number.isFinite(targetY)) {
+    return { x: targetX, y: targetY };
+  }
+
+  const x = Number(node?.x);
+  const y = Number(node?.y);
+  if (Number.isFinite(x) && Number.isFinite(y)) {
+    return { x, y };
+  }
+
+  return null;
+}
+
+function snapshotTransitionPositions(nodes) {
+  const positions = new Map();
+  if (!Array.isArray(nodes)) {
+    return positions;
+  }
+
+  for (const node of nodes) {
+    if (!node || typeof node.id !== 'string' || node.id.length === 0) {
+      continue;
+    }
+    const position = stableNodePosition(node);
+    if (!position) {
+      continue;
+    }
+    positions.set(node.id, {
+      x: position.x,
+      y: position.y,
+      k8sNode: normalizeK8sNodeKey(node?.k8sNode),
+    });
+  }
+
+  return positions;
+}
+
+function buildPositionSeedMap(incomingNodes, persistedPositions, transitionPositions = null) {
+  const positions = new Map();
+
+  if (persistedPositions instanceof Map) {
+    for (const [id, position] of persistedPositions.entries()) {
+      if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+        continue;
+      }
+      positions.set(id, { x: position.x, y: position.y });
+    }
+  }
+
+  if (!(transitionPositions instanceof Map) || !Array.isArray(incomingNodes)) {
+    return positions;
+  }
+
+  for (const node of incomingNodes) {
+    if (!node || typeof node.id !== 'string' || node.id.length === 0 || positions.has(node.id)) {
+      continue;
+    }
+    const transitionPosition = transitionPositions.get(node.id);
+    if (!transitionPosition) {
+      continue;
+    }
+    if (!Number.isFinite(transitionPosition.x) || !Number.isFinite(transitionPosition.y)) {
+      continue;
+    }
+    if (transitionPosition.k8sNode !== normalizeK8sNodeKey(node?.k8sNode)) {
+      continue;
+    }
+
+    positions.set(node.id, {
+      x: transitionPosition.x,
+      y: transitionPosition.y,
+    });
+  }
+
+  return positions;
+}
+
+function snapshotModeTransitionPositions(modeStateByMode) {
+  return {
+    [VIEW_MODES.service]: snapshotTransitionPositions(modeStateByMode?.[VIEW_MODES.service]?.graphData?.nodes),
+    [VIEW_MODES.pod]: snapshotTransitionPositions(modeStateByMode?.[VIEW_MODES.pod]?.graphData?.nodes),
+  };
 }
 
 function overlapEscapeDirection(targetId, otherId) {
@@ -745,6 +940,31 @@ function applyNodeGroupedLayoutInPlace(nodes, pinnedPositions = null, immobileNo
   return plan.boxes;
 }
 
+function buildDefaultLayoutModeState(currentModeState) {
+  const graphData = currentModeState.graphData;
+
+  if (graphData.nodes.length === 0) {
+    return {
+      ...currentModeState,
+      layoutMode: LAYOUT_MODES.default,
+      nodeGroupBoxes: [],
+    };
+  }
+
+  applyGroupedLayoutTargetsInPlace(graphData.nodes);
+
+  return {
+    ...currentModeState,
+    layoutMode: LAYOUT_MODES.default,
+    nodeGroupBoxes: [],
+    graphData: {
+      ...graphData,
+      nodes: [...graphData.nodes],
+      links: [...graphData.links],
+    },
+  };
+}
+
 function updateExistingNode(existingNode, nodePatch, pinnedPosition, isDragging) {
   existingNode.label = nodePatch.label;
   existingNode.namespace = nodePatch.namespace;
@@ -949,18 +1169,24 @@ export function useFlowStream(
     [VIEW_MODES.service]: new Set(),
     [VIEW_MODES.pod]: new Set(),
   });
+  const modeTransitionPositionsRef = useRef(snapshotModeTransitionPositions());
+  const activeModeRef = useRef(resolvedActiveMode);
+
+  useEffect(() => {
+    activeModeRef.current = resolvedActiveMode;
+  }, [resolvedActiveMode]);
 
   const trackNodePosition = useCallback((nodeId, x, y) => {
     if (!nodeId || !Number.isFinite(x) || !Number.isFinite(y)) {
       return;
     }
-    const mode = resolvedActiveMode;
+    const mode = activeModeRef.current;
     draggingNodeIdsRef.current[mode].add(nodeId);
     nodePositionsRef.current[mode].set(nodeId, { x, y });
   }, []);
 
   const persistNodePosition = useCallback((nodeId, x, y) => {
-    const mode = resolvedActiveMode;
+    const mode = activeModeRef.current;
     const draggingNodeIds = draggingNodeIdsRef.current[mode];
     if (!nodeId || !Number.isFinite(x) || !Number.isFinite(y)) {
       draggingNodeIds.delete(nodeId);
@@ -1016,35 +1242,67 @@ export function useFlowStream(
     setModeState((prev) => {
       const currentModeState = prev[mode];
       const graphData = currentModeState.graphData;
+      const isNodeGroupedPodLayout = mode === VIEW_MODES.pod && currentModeState.layoutMode === LAYOUT_MODES.k8sNode;
 
       if (graphData.nodes.length === 0) {
         return {
           ...prev,
           [mode]: {
             ...currentModeState,
-            layoutMode: LAYOUT_MODES.default,
-            nodeGroupBoxes: [],
+            layoutMode: isNodeGroupedPodLayout ? LAYOUT_MODES.k8sNode : LAYOUT_MODES.default,
+            nodeGroupBoxes: isNodeGroupedPodLayout ? currentModeState.nodeGroupBoxes : [],
           },
         };
       }
 
-      applyGroupedLayoutTargetsInPlace(graphData.nodes);
+      if (isNodeGroupedPodLayout) {
+        const knownNodeKeys = normalizeKnownK8sNodes(
+          currentModeState.k8sNodes,
+          collectKnownK8sNodesFromGraph(graphData.nodes),
+        );
+        const nodeGroupBoxes = applyNodeGroupedLayoutInPlace(
+          graphData.nodes,
+          nodePositionsRef.current[mode],
+          draggingNodeIdsRef.current[mode],
+          knownNodeKeys,
+        );
+
+        return {
+          ...prev,
+          [mode]: {
+            ...currentModeState,
+            layoutMode: LAYOUT_MODES.k8sNode,
+            nodeGroupBoxes,
+            graphData: {
+              ...graphData,
+              nodes: [...graphData.nodes],
+              links: [...graphData.links],
+            },
+          },
+        };
+      }
 
       return {
         ...prev,
-        [mode]: {
-          ...currentModeState,
-          layoutMode: LAYOUT_MODES.default,
-          nodeGroupBoxes: [],
-          graphData: {
-            ...graphData,
-            nodes: [...graphData.nodes],
-            links: [...graphData.links],
-          },
-        },
+        [mode]: buildDefaultLayoutModeState(currentModeState),
       };
     });
   }, [resolvedActiveMode]);
+
+  const showPodsUngrouped = useCallback(() => {
+    const mode = VIEW_MODES.pod;
+    draggingNodeIdsRef.current[mode].clear();
+    nodePositionsRef.current[mode].clear();
+    clearPositionsFromStorage(mode);
+
+    setModeState((prev) => {
+      const currentModeState = prev[mode];
+      return {
+        ...prev,
+        [mode]: buildDefaultLayoutModeState(currentModeState),
+      };
+    });
+  }, []);
 
   const groupByK8sNode = useCallback(() => {
     const mode = VIEW_MODES.pod;
@@ -1081,7 +1339,7 @@ export function useFlowStream(
         },
       };
     });
-  }, [resolvedActiveMode]);
+  }, []);
 
   useEffect(() => {
     for (const mode of MODES) {
@@ -1093,18 +1351,14 @@ export function useFlowStream(
     }
 
     setModeState((prev) => {
+      modeTransitionPositionsRef.current = snapshotModeTransitionPositions(prev);
+
       let next = prev;
       for (const mode of MODES) {
+        const currentModeState = next[mode] || createInitialModeState(resolvedActiveLayer);
         next = {
-          ...updateModeConnected(next, mode, false),
-          [mode]: {
-            ...(next[mode] || createInitialModeState(resolvedActiveLayer)),
-            connected: false,
-            graphData: {
-              ...(next[mode]?.graphData || createEmptyGraph(resolvedActiveLayer)),
-              trafficLayer: resolvedActiveLayer,
-            },
-          },
+          ...next,
+          [mode]: prepareModeStateForStreamRefresh(currentModeState, resolvedActiveLayer),
         };
       }
       return next;
@@ -1123,10 +1377,17 @@ export function useFlowStream(
           const incoming = JSON.parse(event.data);
           setModeState((prev) => {
             const currentModeState = prev[mode];
+            const incomingNodes = Array.isArray(incoming?.nodes) ? incoming.nodes : [];
+            const transitionPositions = modeTransitionPositionsRef.current[mode];
+            const positionSeedMap = buildPositionSeedMap(
+              incomingNodes,
+              nodePositionsRef.current[mode],
+              transitionPositions,
+            );
             const graphData = mergeGraphUpdate(
               currentModeState.graphData,
               incoming,
-              nodePositionsRef.current[mode],
+              positionSeedMap,
               draggingNodeIdsRef.current[mode],
             );
             const k8sNodes = mode === VIEW_MODES.pod
@@ -1139,16 +1400,21 @@ export function useFlowStream(
             if (mode === VIEW_MODES.pod && currentModeState.layoutMode === LAYOUT_MODES.k8sNode) {
               nodeGroupBoxes = applyNodeGroupedLayoutInPlace(
                 graphData.nodes,
-                nodePositionsRef.current[mode],
+                positionSeedMap,
                 draggingNodeIdsRef.current[mode],
                 k8sNodes,
               );
+            }
+            if (transitionPositions) {
+              modeTransitionPositionsRef.current[mode] = null;
             }
 
             return {
               ...prev,
               [mode]: {
                 ...currentModeState,
+                connected: true,
+                refreshing: false,
                 graphData: {
                   ...graphData,
                 },
@@ -1164,7 +1430,23 @@ export function useFlowStream(
       };
 
       source.onerror = () => {
-        setModeState((prev) => updateModeConnected(prev, mode, false));
+        setModeState((prev) => {
+          const currentModeState = prev[mode];
+          if (!currentModeState) {
+            return prev;
+          }
+          if (!currentModeState.connected && !currentModeState.refreshing) {
+            return prev;
+          }
+          return {
+            ...prev,
+            [mode]: {
+              ...currentModeState,
+              connected: false,
+              refreshing: false,
+            },
+          };
+        });
       };
     }
 
@@ -1180,20 +1462,19 @@ export function useFlowStream(
   }, [namespace, resolvedActiveLayer]);
 
   const activeModeState = modeState[resolvedActiveMode] || createInitialModeState(resolvedActiveLayer);
-  const podModeState = modeState[VIEW_MODES.pod] || createInitialModeState(resolvedActiveLayer);
-
   return {
     graphData: activeModeState.graphData,
     trafficLayer: activeModeState.graphData.trafficLayer || resolvedActiveLayer,
     connected: activeModeState.connected,
+    refreshing: activeModeState.refreshing,
     truncation: activeModeState.truncation,
     layoutMode: activeModeState.layoutMode,
     nodeGroupBoxes: activeModeState.nodeGroupBoxes,
-    podNodeCount: podModeState.graphData.nodes.length,
     trackNodePosition,
     persistNodePosition,
     resetLayout,
     groupByK8sNode,
+    showPodsUngrouped,
   };
 }
 
@@ -1207,4 +1488,11 @@ export const __TEST_ONLY__ = {
   applyGroupedLayoutInPlace,
   applyGroupedLayoutTargetsInPlace,
   applyNodeGroupedLayoutInPlace,
+  buildDefaultLayoutModeState,
+  normalizeK8sNodeKey,
+  stableNodePosition,
+  snapshotTransitionPositions,
+  snapshotModeTransitionPositions,
+  buildPositionSeedMap,
+  prepareModeStateForStreamRefresh,
 };

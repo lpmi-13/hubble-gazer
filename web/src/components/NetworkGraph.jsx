@@ -11,6 +11,14 @@ import {
   protocolLegend,
   trafficParticleCount,
 } from './graphEncoding';
+import {
+  boundsExceedViewport,
+  collectViewportBounds,
+  fitRequiresZoomOut,
+  fitViewportToBounds,
+  hasViewportPosition,
+  viewportFitChanged,
+} from './graphViewport';
 
 const NAMESPACE_COLORS = {
   'demo': '#58a6ff',
@@ -50,9 +58,13 @@ const TOUCH_LABEL_HEIGHT = 18;
 const TOUCH_LABEL_PADDING_X = 10;
 const TOUCH_LABEL_GAP = 6;
 const INITIAL_VIEW_FIT_DURATION_MS = 720;
-const INITIAL_VIEW_SETTLE_DELAY_MS = 280;
 const INITIAL_VIEW_SETTLE_DURATION_MS = 420;
 const INITIAL_VIEW_MAX_WAIT_FRAMES = 24;
+const INITIAL_VIEW_WAIT_FOR_DATA_MS = 5000;
+const INITIAL_VIEW_FOLLOW_UP_MS = 1400;
+const INITIAL_VIEW_CENTER_EPSILON = 6;
+const INITIAL_VIEW_ZOOM_EPSILON = 0.035;
+const CONDITIONAL_VIEWPORT_FIT_DURATION_MS = 260;
 
 function isCoarsePointer() {
   return typeof window !== 'undefined'
@@ -187,15 +199,181 @@ function touchLabelBox(node, pagePoint, zoom) {
   };
 }
 
-function isPositionedNode(node) {
-  return Number.isFinite(node?.x) && Number.isFinite(node?.y);
-}
-
 function autoFitPadding(dimensions) {
   const shortestSide = Math.max(0, Math.min(dimensions.width, dimensions.height));
   const coarsePadding = shortestSide * 0.18;
   const finePadding = shortestSide * 0.12;
   return Math.round(Math.max(isCoarsePointer() ? 52 : 72, isCoarsePointer() ? coarsePadding : finePadding));
+}
+
+function scheduleViewportFitRequest({
+  requestKey,
+  viewportFitReady,
+  dimensions,
+  graphRef,
+  graphNodesRef,
+  groupingModeRef,
+  nodeGroupBoxesRef,
+  lastAppliedKeyRef,
+  animated = false,
+  fitMode = 'always',
+}) {
+  if (!requestKey || !viewportFitReady || dimensions.width <= 0 || dimensions.height <= 0) {
+    return undefined;
+  }
+  if (lastAppliedKeyRef.current === requestKey) {
+    return undefined;
+  }
+
+  let frameCount = 0;
+  let rafId = 0;
+  let cancelled = false;
+  let startedAtMs = null;
+  let firstFitAtMs = null;
+  let lastAppliedFit = null;
+  const padding = autoFitPadding(dimensions);
+
+  const nextViewportFit = () => {
+    const graph = graphRef.current;
+    const nodes = graphNodesRef.current;
+    if (!graph || nodes.length === 0) {
+      return null;
+    }
+
+    const bounds = collectViewportBounds(nodes, {
+      includeLayoutTargets: true,
+      nodeGroupBoxes: groupingModeRef.current === NODE_GROUP_MODE ? nodeGroupBoxesRef.current : [],
+      nodeRadius: NODE_RADIUS,
+    });
+
+    const fit = fitViewportToBounds(bounds, dimensions, padding, {
+      minZoom: typeof graph.minZoom === 'function' ? graph.minZoom() : 0,
+      maxZoom: typeof graph.maxZoom === 'function' ? graph.maxZoom() : Number.POSITIVE_INFINITY,
+    });
+    return { bounds, fit };
+  };
+
+  const currentViewportBounds = () => {
+    const graph = graphRef.current;
+    if (!graph || typeof graph.screen2GraphCoords !== 'function') {
+      return null;
+    }
+
+    const left = Math.max(0, Math.min(dimensions.width, padding));
+    const top = Math.max(0, Math.min(dimensions.height, padding));
+    const right = Math.max(left + 1, dimensions.width - padding);
+    const bottom = Math.max(top + 1, dimensions.height - padding);
+
+    const topLeft = graph.screen2GraphCoords(left, top);
+    const bottomRight = graph.screen2GraphCoords(right, bottom);
+    if (!Number.isFinite(topLeft?.x) || !Number.isFinite(topLeft?.y) || !Number.isFinite(bottomRight?.x) || !Number.isFinite(bottomRight?.y)) {
+      return null;
+    }
+
+    return {
+      minX: Math.min(topLeft.x, bottomRight.x),
+      maxX: Math.max(topLeft.x, bottomRight.x),
+      minY: Math.min(topLeft.y, bottomRight.y),
+      maxY: Math.max(topLeft.y, bottomRight.y),
+    };
+  };
+
+  const runViewportFit = (nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now()) => {
+    if (cancelled) {
+      return;
+    }
+    if (startedAtMs === null) {
+      startedAtMs = nowMs;
+    }
+
+    const graph = graphRef.current;
+    const nodes = graphNodesRef.current;
+    if (!graph || nodes.length === 0) {
+      if (nowMs - startedAtMs < INITIAL_VIEW_WAIT_FOR_DATA_MS) {
+        rafId = window.requestAnimationFrame(runViewportFit);
+      }
+      return;
+    }
+
+    const viewportNodeCount = nodes.filter((node) => hasViewportPosition(node, true)).length;
+    if (viewportNodeCount === 0) {
+      if (nowMs - startedAtMs < INITIAL_VIEW_WAIT_FOR_DATA_MS) {
+        rafId = window.requestAnimationFrame(runViewportFit);
+      }
+      return;
+    }
+
+    if (viewportNodeCount < nodes.length && frameCount < INITIAL_VIEW_MAX_WAIT_FRAMES) {
+      frameCount += 1;
+      rafId = window.requestAnimationFrame(runViewportFit);
+      return;
+    }
+
+    const nextFit = nextViewportFit();
+    if (!nextFit?.fit || !nextFit?.bounds) {
+      if (nowMs - startedAtMs < INITIAL_VIEW_WAIT_FOR_DATA_MS) {
+        rafId = window.requestAnimationFrame(runViewportFit);
+      }
+      return;
+    }
+
+    const { bounds, fit } = nextFit;
+
+    if (!animated && fitMode === 'if-needed') {
+      const viewportBounds = currentViewportBounds();
+      if (viewportBounds && !boundsExceedViewport(bounds, viewportBounds)) {
+        lastAppliedKeyRef.current = requestKey;
+        return;
+      }
+
+      const currentZoom = typeof graph.zoom === 'function' ? graph.zoom() : Number.NaN;
+      const durationMs = fitRequiresZoomOut(currentZoom, fit.zoom, INITIAL_VIEW_ZOOM_EPSILON)
+        ? CONDITIONAL_VIEWPORT_FIT_DURATION_MS
+        : 0;
+      graph.centerAt(fit.centerX, fit.centerY, durationMs);
+      graph.zoom(fit.zoom, durationMs);
+      lastAppliedKeyRef.current = requestKey;
+      return;
+    }
+
+    if (!animated) {
+      graph.centerAt(fit.centerX, fit.centerY, 0);
+      graph.zoom(fit.zoom, 0);
+      lastAppliedKeyRef.current = requestKey;
+      return;
+    }
+
+    if (viewportFitChanged(lastAppliedFit, fit, {
+      centerEpsilon: INITIAL_VIEW_CENTER_EPSILON,
+      zoomEpsilon: INITIAL_VIEW_ZOOM_EPSILON,
+    })) {
+      const durationMs = firstFitAtMs === null
+        ? INITIAL_VIEW_FIT_DURATION_MS
+        : INITIAL_VIEW_SETTLE_DURATION_MS;
+      graph.centerAt(fit.centerX, fit.centerY, durationMs);
+      graph.zoom(fit.zoom, durationMs);
+      lastAppliedFit = fit;
+      if (firstFitAtMs === null) {
+        firstFitAtMs = nowMs;
+        lastAppliedKeyRef.current = requestKey;
+      }
+    }
+
+    const deadlineMs = firstFitAtMs === null
+      ? startedAtMs + INITIAL_VIEW_WAIT_FOR_DATA_MS
+      : firstFitAtMs + INITIAL_VIEW_FOLLOW_UP_MS;
+    if (nowMs < deadlineMs) {
+      rafId = window.requestAnimationFrame(runViewportFit);
+    }
+  };
+
+  rafId = window.requestAnimationFrame(runViewportFit);
+  return () => {
+    cancelled = true;
+    if (rafId) {
+      window.cancelAnimationFrame(rafId);
+    }
+  };
 }
 
 function controlPointForCurve(source, target, curvature) {
@@ -272,9 +450,14 @@ function drawParticlesOnCurve(ctx, start, control, end, link, nowMs, trafficLaye
 export default function NetworkGraph({
   data,
   trafficLayer = 'l4',
+  refreshing = false,
   groupingMode = '',
   nodeGroupBoxes = [],
   viewportResetKey = 'default',
+  viewportFitKey = '',
+  viewportFitIfNeededKey = '',
+  viewportFitReady = true,
+  layoutMotionEnabled = false,
   onLinkClick,
   onNodeDrag,
   onNodePositionChange,
@@ -285,8 +468,12 @@ export default function NetworkGraph({
   const draggingNodeIdRef = useRef(null);
   const touchDragRef = useRef(null);
   const groupingModeRef = useRef(groupingMode);
+  const nodeGroupBoxesRef = useRef(nodeGroupBoxes);
   const groupBoxesByKeyRef = useRef(new Map());
   const lastAutoFitKeyRef = useRef('');
+  const lastViewportFitKeyRef = useRef('');
+  const lastViewportFitIfNeededKeyRef = useRef('');
+  const layoutMotionEnabledRef = useRef(layoutMotionEnabled);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [hasReceivedData, setHasReceivedData] = useState(false);
@@ -306,6 +493,7 @@ export default function NetworkGraph({
   }, [groupingMode]);
 
   useEffect(() => {
+    nodeGroupBoxesRef.current = Array.isArray(nodeGroupBoxes) ? nodeGroupBoxes : [];
     const byKey = new Map();
     for (const box of nodeGroupBoxes || []) {
       if (!box || typeof box.key !== 'string') {
@@ -315,6 +503,10 @@ export default function NetworkGraph({
     }
     groupBoxesByKeyRef.current = byKey;
   }, [nodeGroupBoxes]);
+
+  useEffect(() => {
+    layoutMotionEnabledRef.current = layoutMotionEnabled;
+  }, [layoutMotionEnabled]);
 
   useEffect(() => {
     let rafId = 0;
@@ -372,6 +564,20 @@ export default function NetworkGraph({
             node.vy = 0;
             moved = true;
           }
+          continue;
+        }
+
+        if (!layoutMotionEnabledRef.current) {
+          const clamped = isNodeGrouped
+            ? clampToGroupBox(node, targetX, targetY, groupBoxesByKey)
+            : { x: targetX, y: targetY };
+          node.x = clamped.x;
+          node.y = clamped.y;
+          node.fx = clamped.x;
+          node.fy = clamped.y;
+          node.vx = 0;
+          node.vy = 0;
+          moved = true;
           continue;
         }
 
@@ -447,65 +653,47 @@ export default function NetworkGraph({
   }, []);
 
   useEffect(() => {
-    if (!viewportResetKey || dimensions.width <= 0 || dimensions.height <= 0 || data.nodes.length === 0) {
-      return undefined;
-    }
-    if (lastAutoFitKeyRef.current === viewportResetKey) {
-      return undefined;
-    }
+    return scheduleViewportFitRequest({
+      requestKey: viewportResetKey,
+      viewportFitReady,
+      dimensions,
+      graphRef,
+      graphNodesRef,
+      groupingModeRef,
+      nodeGroupBoxesRef,
+      lastAppliedKeyRef: lastAutoFitKeyRef,
+      animated: true,
+    });
+  }, [dimensions.height, dimensions.width, viewportFitReady, viewportResetKey]);
 
-    let frameCount = 0;
-    let rafId = 0;
-    let settleTimeout = 0;
-    let cancelled = false;
-    const padding = autoFitPadding(dimensions);
-    const fitNodeFilter = (node) => isPositionedNode(node);
+  useEffect(() => {
+    return scheduleViewportFitRequest({
+      requestKey: viewportFitKey,
+      viewportFitReady,
+      dimensions,
+      graphRef,
+      graphNodesRef,
+      groupingModeRef,
+      nodeGroupBoxesRef,
+      lastAppliedKeyRef: lastViewportFitKeyRef,
+      animated: false,
+    });
+  }, [dimensions.height, dimensions.width, viewportFitKey, viewportFitReady]);
 
-    const runAutoFit = () => {
-      if (cancelled) {
-        return;
-      }
-
-      const graph = graphRef.current;
-      const nodes = graphNodesRef.current;
-      if (!graph || nodes.length === 0) {
-        rafId = window.requestAnimationFrame(runAutoFit);
-        return;
-      }
-
-      const positionedNodeCount = nodes.filter(isPositionedNode).length;
-      if (positionedNodeCount === 0) {
-        rafId = window.requestAnimationFrame(runAutoFit);
-        return;
-      }
-
-      if (positionedNodeCount < nodes.length && frameCount < INITIAL_VIEW_MAX_WAIT_FRAMES) {
-        frameCount += 1;
-        rafId = window.requestAnimationFrame(runAutoFit);
-        return;
-      }
-
-      lastAutoFitKeyRef.current = viewportResetKey;
-      graph.zoomToFit(INITIAL_VIEW_FIT_DURATION_MS, padding, fitNodeFilter);
-      settleTimeout = window.setTimeout(() => {
-        if (cancelled || lastAutoFitKeyRef.current !== viewportResetKey) {
-          return;
-        }
-        graph.zoomToFit(INITIAL_VIEW_SETTLE_DURATION_MS, padding, fitNodeFilter);
-      }, INITIAL_VIEW_SETTLE_DELAY_MS);
-    };
-
-    rafId = window.requestAnimationFrame(runAutoFit);
-    return () => {
-      cancelled = true;
-      if (rafId) {
-        window.cancelAnimationFrame(rafId);
-      }
-      if (settleTimeout) {
-        window.clearTimeout(settleTimeout);
-      }
-    };
-  }, [data.nodes.length, dimensions.height, dimensions.width, viewportResetKey]);
+  useEffect(() => {
+    return scheduleViewportFitRequest({
+      requestKey: viewportFitIfNeededKey,
+      viewportFitReady,
+      dimensions,
+      graphRef,
+      graphNodesRef,
+      groupingModeRef,
+      nodeGroupBoxesRef,
+      lastAppliedKeyRef: lastViewportFitIfNeededKeyRef,
+      animated: false,
+      fitMode: 'if-needed',
+    });
+  }, [dimensions.height, dimensions.width, viewportFitIfNeededKey, viewportFitReady]);
 
   const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
     const label = node.label || node.id;
@@ -909,8 +1097,8 @@ export default function NetworkGraph({
 
   const showLoading = !hasReceivedData && data.nodes.length === 0;
   const showEmpty = hasReceivedData && data.nodes.length === 0;
+  const showRefreshing = refreshing && !showLoading;
   const showNoL7Notice = trafficLayer === 'l7' && hasReceivedData && data.nodes.length > 0 && data.links.length === 0;
-  const showNodeStateLegend = data.nodes.some((node) => node?.lifecycle || node?.kind);
   const legendRows = trafficLayer === 'l7'
     ? [
       'More particles = more L7 events',
@@ -969,12 +1157,6 @@ export default function NetworkGraph({
           <span className="graph-legend-swatch graph-legend-swatch-drop" />
           {legendRows[2]}
         </div>
-        {showNodeStateLegend && (
-          <div className="graph-legend-row">
-            <span className="graph-legend-swatch graph-legend-swatch-node-state" />
-            Solid circles = live pods, red-ring circles = terminated pods, amber diamonds = unresolved endpoints
-          </div>
-        )}
         <div className="graph-legend-row graph-legend-row-protocols">
           <span className="graph-legend-swatch graph-legend-swatch-mixed" />
           Protocol colors:
@@ -994,6 +1176,15 @@ export default function NetworkGraph({
           <div className="graph-inline-notice-text">L7 visibility must be enabled in Cilium/Hubble for application traffic to appear.</div>
         </div>
       )}
+      <div
+        className={`graph-refresh-indicator ${showRefreshing ? 'visible' : ''}`}
+        role={showRefreshing ? 'status' : undefined}
+        aria-live={showRefreshing ? 'polite' : undefined}
+        aria-hidden={!showRefreshing}
+      >
+        <span className="graph-refresh-spinner" aria-hidden="true" />
+        <span>Updating graph...</span>
+      </div>
       {showLoading && (
         <div className="graph-overlay" aria-live="polite">
           <div className="graph-loading">
