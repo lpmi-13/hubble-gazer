@@ -52,7 +52,7 @@ L7 mode depends on Cilium/Hubble exposing L7 flow data. When L7 visibility is no
 
 Pod view remains traffic-driven in all scopes. Pods stay visible only while they still have flows inside the active window; terminated pods are shown with a distinct style until those flows expire.
 When Hubble omits a pod name for an endpoint, the UI shows an explicit unresolved endpoint bucket instead of collapsing traffic onto the service name.
-When Kubernetes pod metadata is available, grouped pod placement uses the Kubernetes API (`pod.spec.nodeName`) instead of inferring worker nodes from Hubble observer flows.
+When Kubernetes pod metadata is available, grouped pod placement uses the Kubernetes API (`pod.spec.nodeName`). If that metadata is unavailable or still warming up, pod placement falls back to Hubble observer flows so `Pods by Node` can still render.
 
 ### Additional commands
 

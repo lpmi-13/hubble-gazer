@@ -167,6 +167,65 @@ func TestSnapshotWithOptionsPodViewIncludesK8sNode(t *testing.T) {
 	}
 }
 
+func TestSnapshotWithOptionsPodViewFallsBackToObservedNodesWhenMetadataNotReady(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+	aggregator.SetPodMetadataSource(staticPodMetadataSource{
+		ready: false,
+		pods: map[string]PodMetadata{
+			"demo/frontend-0": {NodeName: "node-z"},
+			"demo/api-0":      {NodeName: "node-y"},
+		},
+	})
+
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-b", flowpb.TrafficDirection_INGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+
+	snapshot := aggregator.SnapshotWithOptions(SnapshotOptions{
+		ViewMode: ViewModePod,
+	})
+
+	byID := make(map[string]Node, len(snapshot.Nodes))
+	for _, node := range snapshot.Nodes {
+		byID[node.ID] = node
+	}
+
+	frontend, ok := byID["demo/frontend-0"]
+	if !ok {
+		t.Fatalf("expected frontend pod node to exist")
+	}
+	if frontend.Lifecycle != NodeLifecycleLive {
+		t.Fatalf("expected frontend pod to remain live without ready metadata, got %q", frontend.Lifecycle)
+	}
+	if frontend.K8sNode != "node-a" {
+		t.Fatalf("expected frontend pod to fall back to observed node-a, got %q", frontend.K8sNode)
+	}
+
+	api, ok := byID["demo/api-0"]
+	if !ok {
+		t.Fatalf("expected api pod node to exist")
+	}
+	if api.Lifecycle != NodeLifecycleLive {
+		t.Fatalf("expected api pod to remain live without ready metadata, got %q", api.Lifecycle)
+	}
+	if api.K8sNode != "node-b" {
+		t.Fatalf("expected api pod to fall back to observed node-b, got %q", api.K8sNode)
+	}
+
+	if len(snapshot.K8sNodes) != 2 {
+		t.Fatalf("expected two observed k8s nodes, got %d", len(snapshot.K8sNodes))
+	}
+}
+
 func TestSnapshotWithOptionsPodViewAppliesTopNTruncation(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
 

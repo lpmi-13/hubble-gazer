@@ -465,8 +465,10 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 						n.K8sNode = podMeta.NodeName
 					} else {
 						n.Lifecycle = NodeLifecycleTerminated
-						n.K8sNode = dominantNodeName(podNodeVotes[n.ID])
 					}
+				}
+				if n.K8sNode == "" {
+					n.K8sNode = dominantNodeName(podNodeVotes[n.ID])
 				}
 				if n.Lifecycle == NodeLifecycleLive {
 					podSummary.LiveNodes++
