@@ -20,6 +20,9 @@ This is what runs locally when you run with `make dev` (it has sample data)
 - `FLOW_SOURCE` (`hubble` or `mock`, default: `hubble`)
 - `HUBBLE_RELAY_ADDR` (default: `hubble-relay.kube-system.svc.cluster.local:4245`)
 - `LISTEN_ADDR` (default: `:3000`)
+- `READINESS_REQUIRE_HUBBLE_CONNECTED` (`true|false`, default: `true` in live mode)
+- `READINESS_REQUIRE_POD_METADATA` (`true|false`, default: `false`)
+- `READINESS_WARMUP_DURATION` (default: `10s`)
 
 ## Local Development
 
@@ -44,6 +47,10 @@ HUBBLE_RELAY_ADDR=<relay-host:4245> make dev-live
 L7 mode depends on Cilium/Hubble exposing L7 flow data. When L7 visibility is not enabled, the UI stays functional but the `Application (L7)` view will be empty.
 
 ## API Notes
+
+Health endpoints:
+- `GET /healthz` reports process liveness
+- `GET /readyz` reports traffic readiness for Kubernetes rollouts and ingress routing
 
 `GET /api/flows` accepts:
 - `view=service|pod`

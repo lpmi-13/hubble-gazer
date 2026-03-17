@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,13 +32,19 @@ func main() {
 	tlsKey := os.Getenv("TLS_KEY_FILE")
 	hubbleTLS := os.Getenv("HUBBLE_RELAY_TLS") == "true"
 	podViewMaxNodes := envOrPositiveInt("POD_VIEW_MAX_NODES", 500)
+	readinessWarmup := envOrDuration("READINESS_WARMUP_DURATION", 10*time.Second)
+	requireRelayReady := envOrBool("READINESS_REQUIRE_HUBBLE_CONNECTED", flowSource == "hubble")
+	requirePodMetadataReady := envOrBool("READINESS_REQUIRE_POD_METADATA", false)
 
 	aggregator := graph.NewAggregator(30 * time.Second)
+	readiness := newReadinessState(readinessWarmup, requireRelayReady, requirePodMetadataReady)
 	const mockSeed int64 = 42
 
 	switch flowSource {
 	case "mock":
-		aggregator.SetPodMetadataSource(mock.NewMetadataSource(mockSeed))
+		metadataSource := mock.NewMetadataSource(mockSeed)
+		aggregator.SetPodMetadataSource(metadataSource)
+		readiness.SetMetadataSource(metadataSource)
 		generator := mock.NewGenerator(mockSeed, aggregator)
 		go generator.Run(context.Background())
 		log.Printf("flow source: mock generator")
@@ -47,6 +54,7 @@ func main() {
 			log.Printf("kubernetes pod metadata disabled: %v", err)
 		} else {
 			aggregator.SetPodMetadataSource(resolver)
+			readiness.SetMetadataSource(resolver)
 			go func() {
 				if runErr := resolver.Run(context.Background()); runErr != nil && runErr != context.Canceled {
 					log.Printf("kubernetes pod metadata stopped: %v", runErr)
@@ -56,6 +64,7 @@ func main() {
 		}
 
 		client := hubble.NewClient(relayAddr, hubbleTLS, aggregator)
+		client.SetConnectionStateListener(readiness.SetRelayConnected)
 		go func() {
 			for {
 				log.Printf("connecting to Hubble Relay at %s", relayAddr)
@@ -76,6 +85,16 @@ func main() {
 	const maxSSEConnections = 100
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ready, reason := readiness.Ready()
+		if !ready {
+			http.Error(w, reason, http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -202,6 +221,36 @@ func envOrPositiveInt(key string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed <= 0 {
 		log.Printf("invalid %s=%q; using fallback %d", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envOrBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("invalid %s=%q; using fallback %t", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envOrDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		log.Printf("invalid %s=%q; using fallback %s", key, value, fallback)
+		return fallback
+	}
+	if parsed < 0 {
+		log.Printf("invalid %s=%q; using fallback %s", key, value, fallback)
 		return fallback
 	}
 	return parsed

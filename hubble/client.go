@@ -22,9 +22,10 @@ type FlowConsumer interface {
 
 // Client connects to Hubble Relay and streams flows.
 type Client struct {
-	addr     string
-	useTLS   bool
-	consumer FlowConsumer
+	addr                     string
+	useTLS                   bool
+	consumer                 FlowConsumer
+	connectionStateListener  func(bool)
 }
 
 // NewClient creates a new Hubble Relay client.
@@ -38,8 +39,24 @@ func NewClient(addr string, useTLS bool, consumer FlowConsumer) *Client {
 	}
 }
 
+func (c *Client) SetConnectionStateListener(listener func(bool)) {
+	if c == nil {
+		return
+	}
+	c.connectionStateListener = listener
+}
+
+func (c *Client) setConnected(connected bool) {
+	if c == nil || c.connectionStateListener == nil {
+		return
+	}
+	c.connectionStateListener(connected)
+}
+
 // Run connects to Hubble Relay and streams flows until an error occurs.
 func (c *Client) Run() error {
+	c.setConnected(false)
+
 	var creds grpc.DialOption
 	if c.useTLS {
 		creds = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
@@ -65,6 +82,8 @@ func (c *Client) Run() error {
 	}
 
 	log.Printf("connected to Hubble Relay, streaming flows")
+	c.setConnected(true)
+	defer c.setConnected(false)
 
 	for {
 		resp, err := stream.Recv()

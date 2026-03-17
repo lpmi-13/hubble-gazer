@@ -61,6 +61,12 @@ spec:
           value: hubble-relay.kube-system.svc.cluster.local:4245
         - name: LISTEN_ADDR
           value: ":3000"
+        - name: READINESS_REQUIRE_HUBBLE_CONNECTED
+          value: "true"
+        - name: READINESS_REQUIRE_POD_METADATA
+          value: "true"
+        - name: READINESS_WARMUP_DURATION
+          value: "10s"
         resources:
           requests:
             cpu: 50m
@@ -79,7 +85,7 @@ spec:
             type: RuntimeDefault
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /readyz
             port: 3000
           initialDelaySeconds: 5
           periodSeconds: 10
