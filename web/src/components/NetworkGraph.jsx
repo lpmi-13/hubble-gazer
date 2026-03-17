@@ -19,14 +19,7 @@ import {
   hasViewportPosition,
   viewportFitChanged,
 } from './graphViewport';
-
-const NAMESPACE_COLORS = {
-  'demo': '#58a6ff',
-  'kube-system': '#bc8cff',
-  'default': '#79c0ff',
-};
-
-const DEFAULT_COLOR = '#8b949e';
+import { namespaceColor } from './namespaceColors';
 const TERMINATED_STROKE = '#ff7b72';
 const TERMINATED_FILL = 'rgba(255, 123, 114, 0.16)';
 const TERMINATED_GLOW = 'rgba(255, 123, 114, 0.24)';
@@ -77,7 +70,7 @@ function getNodeRadius() {
 }
 
 function getNodeColor(node) {
-  return NAMESPACE_COLORS[node.namespace] || DEFAULT_COLOR;
+  return namespaceColor(node?.namespace);
 }
 
 function nodeKind(node) {

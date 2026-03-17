@@ -322,7 +322,7 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 
 	filtered := make([]flowRecord, 0, len(a.flows))
 	for _, f := range a.flows {
-		if options.Namespace == "" || f.srcNS == options.Namespace || f.dstNS == options.Namespace {
+		if flowTouchesNamespace(f, options.Namespace) {
 			filtered = append(filtered, f)
 		}
 	}
@@ -417,6 +417,23 @@ func (a *Aggregator) SnapshotWithOptions(options SnapshotOptions) Graph {
 			continue
 		}
 		e.protocol[f.protocol]++
+	}
+
+	if options.Namespace != "" {
+		for id, node := range nodeMap {
+			if node == nil || node.Namespace != options.Namespace {
+				delete(nodeMap, id)
+			}
+		}
+		for key := range edgeMap {
+			if _, ok := nodeMap[key.src]; !ok {
+				delete(edgeMap, key)
+				continue
+			}
+			if _, ok := nodeMap[key.dst]; !ok {
+				delete(edgeMap, key)
+			}
+		}
 	}
 
 	graph := Graph{
@@ -533,6 +550,13 @@ func cloneProtocolCounts(protocols map[string]int) map[string]int {
 		return nil
 	}
 	return copied
+}
+
+func flowTouchesNamespace(f flowRecord, namespace string) bool {
+	if namespace == "" {
+		return true
+	}
+	return f.srcNS == namespace || f.dstNS == namespace
 }
 
 func hasValidL7Record(f flowRecord) bool {

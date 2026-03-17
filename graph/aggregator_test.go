@@ -85,6 +85,44 @@ func TestSnapshotProtocolMixWorksWithNamespaceFilter(t *testing.T) {
 	}
 }
 
+func TestSnapshotNamespaceFilterExcludesCrossNamespacePeers(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlow("demo", "frontend", "demo", "api", flowpb.Verdict_FORWARDED, "TCP"))
+	aggregator.AddFlow(newFlow("demo", "frontend", "kube-system", "coredns", flowpb.Verdict_FORWARDED, "UDP"))
+	aggregator.AddFlow(newFlow("demo", "frontend", "", "world", flowpb.Verdict_FORWARDED, "TCP"))
+
+	snapshot := aggregator.Snapshot("demo")
+	if len(snapshot.Nodes) != 2 {
+		t.Fatalf("expected only in-namespace nodes, got %d", len(snapshot.Nodes))
+	}
+	if len(snapshot.Links) != 1 {
+		t.Fatalf("expected only in-namespace links, got %d", len(snapshot.Links))
+	}
+	for _, node := range snapshot.Nodes {
+		if node.Namespace != "demo" {
+			t.Fatalf("unexpected cross-namespace node in filtered snapshot: %+v", node)
+		}
+	}
+}
+
+func TestSnapshotNamespaceFilterKeepsSelectedNamespaceNodesWithCrossNamespaceTraffic(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+
+	aggregator.AddFlow(newFlow("demo", "frontend", "kube-system", "coredns", flowpb.Verdict_FORWARDED, "UDP"))
+
+	snapshot := aggregator.Snapshot("demo")
+	if len(snapshot.Nodes) != 1 {
+		t.Fatalf("expected selected-namespace node to remain visible, got %d nodes", len(snapshot.Nodes))
+	}
+	if len(snapshot.Links) != 0 {
+		t.Fatalf("expected cross-namespace link to be hidden, got %d links", len(snapshot.Links))
+	}
+	if snapshot.Nodes[0].Namespace != "demo" {
+		t.Fatalf("expected only demo node, got %+v", snapshot.Nodes[0])
+	}
+}
+
 func TestSnapshotWithOptionsPodViewUsesPodIdentity(t *testing.T) {
 	aggregator := NewAggregator(30 * time.Second)
 
@@ -317,6 +355,83 @@ func TestSnapshotWithOptionsPodViewNamespaceFilterUsesCurrentGraphNodesOnly(t *t
 	}
 	if len(emptyFiltered.K8sNodes) != 0 {
 		t.Fatalf("expected no active k8s nodes for missing namespace, got %d", len(emptyFiltered.K8sNodes))
+	}
+}
+
+func TestSnapshotWithOptionsPodViewNamespaceFilterExcludesCrossNamespacePeers(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+	aggregator.SetPodMetadataSource(staticPodMetadataSource{
+		ready: true,
+		pods: map[string]PodMetadata{
+			"demo/frontend-0":         {NodeName: "node-a"},
+			"demo/api-0":              {NodeName: "node-a"},
+			"kube-system/coredns-0":   {NodeName: "node-b"},
+			"kube-system/hubble-ui-0": {NodeName: "node-b"},
+		},
+	})
+
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"demo", "api", "api-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "TCP",
+	))
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"kube-system", "coredns", "coredns-0",
+		"node-b", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "UDP",
+	))
+
+	filtered := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace: "demo",
+		ViewMode:  ViewModePod,
+	})
+	if len(filtered.Nodes) != 2 {
+		t.Fatalf("expected only demo pod nodes, got %d", len(filtered.Nodes))
+	}
+	if len(filtered.Links) != 1 {
+		t.Fatalf("expected only demo pod links, got %d", len(filtered.Links))
+	}
+	for _, node := range filtered.Nodes {
+		if node.Namespace != "demo" {
+			t.Fatalf("unexpected cross-namespace node in filtered pod snapshot: %+v", node)
+		}
+	}
+}
+
+func TestSnapshotWithOptionsPodViewNamespaceFilterKeepsSelectedNamespacePodsWithCrossNamespaceTraffic(t *testing.T) {
+	aggregator := NewAggregator(30 * time.Second)
+	aggregator.SetPodMetadataSource(staticPodMetadataSource{
+		ready: true,
+		pods: map[string]PodMetadata{
+			"demo/frontend-0":       {NodeName: "node-a"},
+			"kube-system/coredns-0": {NodeName: "node-b"},
+		},
+	})
+
+	aggregator.AddFlow(newFlowWithPodsOnNode(
+		"demo", "frontend", "frontend-0",
+		"kube-system", "coredns", "coredns-0",
+		"node-a", flowpb.TrafficDirection_EGRESS,
+		flowpb.Verdict_FORWARDED, "UDP",
+	))
+
+	filtered := aggregator.SnapshotWithOptions(SnapshotOptions{
+		Namespace: "demo",
+		ViewMode:  ViewModePod,
+	})
+	if len(filtered.Nodes) != 1 {
+		t.Fatalf("expected selected-namespace pod to remain visible, got %d nodes", len(filtered.Nodes))
+	}
+	if len(filtered.Links) != 0 {
+		t.Fatalf("expected cross-namespace pod link to be hidden, got %d links", len(filtered.Links))
+	}
+	if len(filtered.K8sNodes) != 1 || filtered.K8sNodes[0] != "node-a" {
+		t.Fatalf("unexpected k8s node list for selected pod: %#v", filtered.K8sNodes)
+	}
+	if filtered.Nodes[0].Namespace != "demo" {
+		t.Fatalf("expected only demo pod node, got %+v", filtered.Nodes[0])
 	}
 }
 
