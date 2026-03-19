@@ -2,6 +2,8 @@
 
 Realtime Kubernetes network traffic visualization for clusters running Cilium + Hubble.
 
+I wrote about why I made this [here](https://dev.to/lpmi13/an-iximiuz-cluster-of-clusters-with-tailscale-and-cilium-43d4)
+
 ## Demo
 
 This is what runs locally when you run with `make dev` (it has sample data)
