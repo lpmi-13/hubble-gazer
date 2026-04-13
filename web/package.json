@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "react-dom": "^19.2.5",
     "react-force-graph-2d": "^1.26.3"
   },
   "devDependencies": {
